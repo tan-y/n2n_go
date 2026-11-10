@@ -1,0 +1,6 @@
+.trae/
+build/
+.DS_Store
+bin/*
+*.a
+third_party/n2n-src/

@@ -1,0 +1,19 @@
+Remove the unconditional keep_running reset performed when run_edge_loop starts.
+
+n2n 3.1.1 writes `*eee->keep_running = true` as the first statement of
+run_edge_loop, which discards a stop request issued between edge_init and the
+loop entry (a real race for Go callers that stop from another goroutine).
+
+The Go binding sets keep_running itself and checks stop_requested before
+entering the loop, so this assignment is no longer needed.
+
+--- a/src/edge_utils.c
++++ b/src/edge_utils.c
+@@ -2895,7 +2895,6 @@ int run_edge_loop (n2n_edge_t *eee) {
+ #endif
+ 
+-    *eee->keep_running = true;
+     update_supernode_reg(eee, time(NULL));
+ 
+     /* Main loop
+     *
