@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"n2n-go/internal/config"
 	"n2n-go/internal/n2n"
@@ -25,6 +27,38 @@ func (s *stringList) Set(v string) error {
 	}
 	*s = append(*s, v)
 	return nil
+}
+
+// acceptMulticastFlag maps -E to n2n's drop_multicast field with inverted
+// polarity: -E (true) accepts multicast, -E=false drops it. This matches the
+// native n2n CLI, where -E means "accept multicast MAC addresses".
+type acceptMulticastFlag struct {
+	drop *bool
+}
+
+func (f acceptMulticastFlag) String() string {
+	if f.drop == nil || *f.drop {
+		return "false"
+	}
+	return "true"
+}
+
+func (f acceptMulticastFlag) Set(v string) error {
+	accept, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("invalid boolean value %q for -E: %w", v, err)
+	}
+	*f.drop = !accept
+	return nil
+}
+
+func (acceptMulticastFlag) IsBoolFlag() bool { return true }
+
+// registerMulticastFlags wires -E (accept multicast, native n2n semantics) and
+// --drop-multicast (explicitly drop, the default).
+func registerMulticastFlags(fs *flag.FlagSet, drop *bool) {
+	fs.Var(acceptMulticastFlag{drop: drop}, "E", "接受组播（等价原生 n2n -E；默认丢弃）")
+	fs.BoolVar(drop, "drop-multicast", *drop, "丢弃组播（默认开启）")
 }
 
 // configPathFromArgs finds -config/--config before flag parsing, because the
@@ -70,8 +104,8 @@ func runEdge(args []string) int {
 	fs.StringVar(&cfg.Community, "community", cfg.Community, "社区名（必填，最长 19 字节）")
 	fs.Var(&supernodes, "l", "supernode 地址 host:port（可重复）")
 	fs.Var(&supernodes, "supernode", "supernode 地址 host:port（可重复）")
-	fs.StringVar(&cfg.CIDR, "a", cfg.CIDR, "静态 IPv4 或 IPv4/CIDR，例如 10.0.0.1/24（必填）")
-	fs.StringVar(&cfg.CIDR, "ip", cfg.CIDR, "静态 IPv4 或 IPv4/CIDR，例如 10.0.0.1/24（必填）")
+	fs.StringVar(&cfg.CIDR, "a", cfg.CIDR, "静态 IPv4/CIDR（例如 10.0.0.1/24）或 auto（由 supernode 分配）")
+	fs.StringVar(&cfg.CIDR, "ip", cfg.CIDR, "静态 IPv4/CIDR（例如 10.0.0.1/24）或 auto（由 supernode 分配）")
 	fs.StringVar(&cfg.Key, "k", cfg.Key, "加密 key（使用非 none 加密算法时必填）")
 	fs.StringVar(&cfg.Key, "key", cfg.Key, "加密 key（使用非 none 加密算法时必填）")
 	fs.BoolVar(&cfg.HeaderEncryption, "H", cfg.HeaderEncryption, "头部加密（需配合 -k/--key）")
@@ -100,12 +134,12 @@ func runEdge(args []string) int {
 	fs.IntVar(&cfg.RegisterTTL, "register-ttl", cfg.RegisterTTL, "注册 TTL（0-255，默认 2）")
 	fs.BoolVar(&cfg.AllowRouting, "r", cfg.AllowRouting, "允许路由")
 	fs.BoolVar(&cfg.AllowRouting, "routing", cfg.AllowRouting, "允许路由")
-	fs.BoolVar(&cfg.DropMulticast, "E", cfg.DropMulticast, "丢弃组播")
-	fs.BoolVar(&cfg.DropMulticast, "drop-multicast", cfg.DropMulticast, "丢弃组播")
+	registerMulticastFlags(fs, &cfg.DropMulticast)
 	fs.IntVar(&cfg.TOS, "T", cfg.TOS, "TOS（0-255，默认 0）")
 	fs.IntVar(&cfg.TOS, "tos", cfg.TOS, "TOS（0-255，默认 0）")
 	fs.StringVar(&cfg.Description, "I", cfg.Description, "设备描述（最长 15 字节）")
 	fs.StringVar(&cfg.Description, "description", cfg.Description, "设备描述（最长 15 字节）")
+	fs.BoolVar(&cfg.IPv6, "ipv6", cfg.IPv6, "承载 IPv6（自动接受组播，需两端都开启）")
 	// 兼容原生 n2n 的 -f：本 CLI 始终前台运行，该参数被接受但不产生效果。
 	fs.Bool("f", false, "前台运行（本 CLI 始终前台，兼容保留）")
 	fs.Bool("foreground", false, "前台运行（本 CLI 始终前台，兼容保留）")
@@ -142,43 +176,90 @@ func runEdge(args []string) int {
 	}
 	defer edge.Close()
 
-	logger.Printf("starting edge: community=%s supernodes=%s ip=%s/%s device=%s cipher=%s",
-		cfg.Community, strings.Join(cfg.Supernodes, ","), cfg.IP, cfg.Mask, cfg.Device, cfg.Cipher)
+	addr := fmt.Sprintf("%s/%s", cfg.IP, cfg.Mask)
+	if cfg.AutoAddress {
+		addr = "auto（等待 supernode 分配）"
+	}
+	logger.Printf("starting edge: community=%s supernodes=%s ip=%s device=%s cipher=%s ipv6=%t",
+		cfg.Community, strings.Join(cfg.Supernodes, ","), addr, cfg.Device, cfg.Cipher, cfg.IPv6)
+	if cfg.IPv6 {
+		logger.Printf("IPv6 enabled: multicast is accepted regardless of -E (neighbour discovery)")
+	}
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- edge.Run() }()
+
+	// In SN_ASSIGN mode the device stays unconfigured until the supernode
+	// answers; apply the address as soon as it arrives.
+	var autoErr chan error
+	if cfg.AutoAddress {
+		autoErr = make(chan error, 1)
+		go func() { autoErr <- waitForAssignedAddress(edge, 15*time.Second) }()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
 
-	select {
-	case err := <-runErr:
-		if err != nil {
-			logger.Printf("edge stopped with error: %v", err)
-			return 1
-		}
-		return 0
-	case s := <-sig:
-		logger.Printf("received %s, shutting down", s)
-		// 与 macOS.md §4.2 保持一致：等 C 层进入 edge loop 后再请求停止。
+	for {
 		select {
-		case <-edge.Started():
-			edge.Stop()
 		case err := <-runErr:
 			if err != nil {
+				logger.Printf("edge stopped with error: %v", err)
+				return 1
+			}
+			return 0
+		case err := <-autoErr:
+			if err != nil {
+				logger.Printf("automatic address assignment failed: %v", err)
+				edge.Stop()
+				<-runErr
+				return 1
+			}
+			autoErr = nil
+		case s := <-sig:
+			logger.Printf("received %s, shutting down", s)
+			// 与 macOS.md §4.2 保持一致：等 C 层进入 edge loop 后再请求停止。
+			select {
+			case <-edge.Started():
+				edge.Stop()
+			case err := <-runErr:
+				if err != nil {
+					logger.Printf("edge stopped with error: %v", err)
+					return 1
+				}
+				logger.Print("edge stopped, utun device released")
+				return 0
+			}
+			if err := <-runErr; err != nil {
 				logger.Printf("edge stopped with error: %v", err)
 				return 1
 			}
 			logger.Print("edge stopped, utun device released")
 			return 0
 		}
-		if err := <-runErr; err != nil {
-			logger.Printf("edge stopped with error: %v", err)
-			return 1
+	}
+}
+
+// waitForAssignedAddress polls the C layer until the supernode-assigned
+// address has been applied to the utun device. The register interval governs
+// how fast the first REGISTER_SUPER_ACK arrives; a failure here is reported to
+// the caller so the process can exit with a non-zero status instead of looking
+// connected while no address is configured.
+func waitForAssignedAddress(edge *n2n.Edge, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		done, err := edge.ConfigureAuto()
+		if err != nil {
+			return err
 		}
-		logger.Print("edge stopped, utun device released")
-		return 0
+		if done {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no address assigned after %s; the supernode must support SN_ASSIGN", timeout)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -188,7 +269,8 @@ Required:
   -c, --community string   社区名（最长 19 字节）
   -l, --supernode host:port
                            supernode 地址（可重复，最多 8 个）
-  -a, --ip IPv4[/CIDR]      静态地址，例如 10.0.0.1/24；裸 IP 默认 /24
+  -a, --ip IPv4[/CIDR]|auto
+                            静态地址（裸 IP 默认 /24），或 auto 由 supernode 分配
 
 Optional:
   -config, --config path    JSON 配置文件（命令行参数优先于文件）
@@ -209,10 +291,16 @@ Optional:
                             注册间隔秒数（默认 20）
   -L, --register-ttl int    注册 TTL（默认 2）
   -r, --routing             允许路由
-  -E, --drop-multicast      丢弃组播（默认开启）
+  -E                        接受组播（等价原生 n2n -E；默认丢弃）
+  --drop-multicast          丢弃组播（默认开启）
   -T, --tos int             TOS 0-255（默认 0）
   -I, --description string  设备描述（最长 15 字节）
+  --ipv6                    承载 IPv6（自动接受组播，需社区内所有节点都开启）
   -f, --foreground          兼容原生 n2n，本 CLI 始终前台运行（忽略）
 
-macOS 首期限制：仅 IPv4；不支持 DHCP、IPv6、组播/广播社区；需要 root 权限。
+macOS 首期限制：仅 IPv4 地址配置；不支持 DHCP、全局 IPv6 地址。IPv4 组播/广播已用
+scripts/multicast-test.sh 验证（当前广播 MAC 实现下不受 -E 约束，见 docs/macOS-p5.md）。
+--ipv6 只承载 IPv6 报文，接口使用 macOS 自动生成的链路本地地址（T3，见 docs/macOS-p5.md）。
+-a auto 由 supernode 分配地址；多个 edge 同时启动时请给每个节点不同的 -I 描述，否则
+可能拿到相同地址。需要 root 权限。
 `

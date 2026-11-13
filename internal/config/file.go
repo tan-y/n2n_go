@@ -35,6 +35,7 @@ type FileConfig struct {
 	DisablePMTUIDiscovery *bool   `json:"disable_pmtu_discovery"`
 	TOS                   *int    `json:"tos"`
 	Description           *string `json:"description"`
+	IPv6                  *bool   `json:"ipv6"`
 }
 
 // LoadFile reads and decodes a JSON config file. Unknown keys are rejected so
@@ -123,5 +124,8 @@ func (f *FileConfig) Apply(c *EdgeConfig) {
 	}
 	if f.Description != nil {
 		c.Description = *f.Description
+	}
+	if f.IPv6 != nil {
+		c.IPv6 = *f.IPv6
 	}
 }

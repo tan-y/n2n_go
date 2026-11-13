@@ -20,8 +20,10 @@ typedef struct n2n_go_config {
     const char **supernodes;
     int          sn_num;
 
-    const char  *ip;   /* dotted IPv4, e.g. 10.0.0.1 */
-    const char  *mask; /* dotted IPv4 netmask, e.g. 255.255.255.0 */
+    const char  *ip;   /* dotted IPv4, e.g. 10.0.0.1; NULL/empty when auto */
+    const char  *mask; /* dotted IPv4 netmask, e.g. 255.255.255.0; NULL/empty when auto */
+    int          auto_address; /* non-zero: SN_ASSIGN, address comes from the supernode */
+    int          ipv6;         /* non-zero: carry IPv6 over the tunnel (--ipv6) */
 
     const char  *device; /* "utun" or "utunN" */
     const char  *mac;
@@ -57,6 +59,13 @@ int n2n_go_edge_run(n2n_go_edge_t *e);
 
 /* Thread-safe/idempotent stop request; may be called before run(). */
 void n2n_go_edge_stop(n2n_go_edge_t *e);
+
+/* Applies the address assigned by the supernode to the utun device (SN_ASSIGN
+ * mode only). Returns 1 once the device is configured (or there is nothing to
+ * do because the loop has finished), 0 while the assignment has not arrived
+ * yet, -1 on failure. Call it repeatedly from another thread/goroutine while
+ * n2n_go_edge_run() is blocked. */
+int n2n_go_edge_configure_auto(n2n_go_edge_t *e);
 
 /* Frees the handle (and cleans up if run() was never called). */
 void n2n_go_edge_destroy(n2n_go_edge_t *e);

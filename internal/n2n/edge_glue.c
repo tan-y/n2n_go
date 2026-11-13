@@ -20,6 +20,9 @@ extern void n2nGoOnStarted(uintptr_t handle);
 #ifdef __APPLE__
 /* Implemented in platform/macos/tuntap_osx.c. */
 extern void tuntap_osx_bind_edge(n2n_edge_t *eee);
+extern void tuntap_osx_enable_ipv6(int on);
+extern int  tuntap_osx_configure(tuntap_dev *device, const char *device_ip,
+                                 const char *device_mask, int mtu);
 #endif
 
 struct n2n_go_edge {
@@ -97,11 +100,21 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
     size_t         clen;
     int            rc;
     int            i;
+    const char    *ip;
+    const char    *mask;
 
     if((cfg == NULL) || (cfg->community == NULL) || (cfg->community[0] == '\0') ||
-       (cfg->ip == NULL) || (cfg->mask == NULL) || (cfg->sn_num < 1) ||
-       (cfg->supernodes == NULL)) {
+       (cfg->sn_num < 1) || (cfg->supernodes == NULL)) {
         set_err(errbuf, errbuf_len, "invalid edge configuration");
+        return NULL;
+    }
+
+    /* In SN_ASSIGN mode the address is unknown until the supernode answers, so
+     * empty strings are legitimate there (open first, configure later). */
+    ip = (cfg->ip != NULL) ? cfg->ip : "";
+    mask = (cfg->mask != NULL) ? cfg->mask : "";
+    if(!cfg->auto_address && ((ip[0] == '\0') || (mask[0] == '\0'))) {
+        set_err(errbuf, errbuf_len, "ip and netmask are required unless -a auto is used");
         return NULL;
     }
 
@@ -184,7 +197,7 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
         e->conf.register_interval = cfg->register_interval;
     if(cfg->register_ttl >= 0)
         e->conf.register_ttl = cfg->register_ttl;
-    e->conf.tuntap_ip_mode = TUNTAP_IP_MODE_STATIC;
+    e->conf.tuntap_ip_mode = cfg->auto_address ? TUNTAP_IP_MODE_SN_ASSIGN : TUNTAP_IP_MODE_STATIC;
 
     if((cfg->description != NULL) && (cfg->description[0] != '\0'))
         strncpy((char *)e->conf.dev_desc, cfg->description, N2N_DESC_SIZE - 1);
@@ -221,8 +234,13 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
         return NULL;
     }
 
-    if(tuntap_open(&e->dev, (char *)((cfg->device != NULL) ? cfg->device : "utun"), "static",
-                   (char *)cfg->ip, (char *)cfg->mask, cfg->mac, cfg->mtu, 0) < 0) {
+#ifdef __APPLE__
+    tuntap_osx_enable_ipv6(cfg->ipv6);
+#endif
+
+    if(tuntap_open(&e->dev, (char *)((cfg->device != NULL) ? cfg->device : "utun"),
+                   cfg->auto_address ? "sn_assign" : "static",
+                   (char *)ip, (char *)mask, cfg->mac, cfg->mtu, 0) < 0) {
         set_err(errbuf, errbuf_len, "failed to open utun device (root privileges required?)");
         cleanup(e);
         free(e);
@@ -238,11 +256,11 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
     memset(&e->eee->tuntap_priv_conf, 0, sizeof(e->eee->tuntap_priv_conf));
     strncpy(e->eee->tuntap_priv_conf.tuntap_dev_name, e->dev.dev_name,
             sizeof(e->eee->tuntap_priv_conf.tuntap_dev_name) - 1);
-    strncpy(e->eee->tuntap_priv_conf.ip_mode, "static",
+    strncpy(e->eee->tuntap_priv_conf.ip_mode, cfg->auto_address ? "sn_assign" : "static",
             sizeof(e->eee->tuntap_priv_conf.ip_mode) - 1);
-    strncpy(e->eee->tuntap_priv_conf.ip_addr, cfg->ip,
+    strncpy(e->eee->tuntap_priv_conf.ip_addr, ip,
             sizeof(e->eee->tuntap_priv_conf.ip_addr) - 1);
-    strncpy(e->eee->tuntap_priv_conf.netmask, cfg->mask,
+    strncpy(e->eee->tuntap_priv_conf.netmask, mask,
             sizeof(e->eee->tuntap_priv_conf.netmask) - 1);
     if(cfg->mac != NULL)
         strncpy(e->eee->tuntap_priv_conf.device_mac, cfg->mac,
@@ -279,6 +297,50 @@ void n2n_go_edge_stop(n2n_go_edge_t *e) {
         return;
     e->stop_requested = 1;
     e->keep_running = 0;
+}
+
+int n2n_go_edge_configure_auto(n2n_go_edge_t *e) {
+    const char *ip;
+    const char *mask;
+
+    if((e == NULL) || (e->eee == NULL))
+        return 1; /* the loop already finished: nothing left to configure */
+    if(e->eee->conf.tuntap_ip_mode != TUNTAP_IP_MODE_SN_ASSIGN)
+        return 1; /* static address, configured by tuntap_open */
+    if(e->eee->device.ip_addr != 0)
+        return 1; /* assignment already applied */
+
+    /* The REGISTER_SUPER_ACK handler stores the assignment here. */
+    ip = e->eee->tuntap_priv_conf.ip_addr;
+    mask = e->eee->tuntap_priv_conf.netmask;
+    if((ip[0] == '\0') || (mask[0] == '\0'))
+        return 0; /* not assigned yet */
+
+#ifdef __APPLE__
+    if(tuntap_osx_configure(&e->dev, ip, mask, e->dev.mtu) < 0) {
+        traceEvent(TRACE_ERROR, "failed to apply the supernode-assigned address %s/%s", ip, mask);
+        return -1;
+    }
+#else
+    return -1;
+#endif
+
+    /* send_register_super() reads the address from this copy, so it has to be
+     * updated as well; otherwise every registration reports 0/0 and the
+     * supernode keeps re-assigning. */
+    e->eee->device.ip_addr = e->dev.ip_addr;
+    e->eee->device.device_mask = e->dev.device_mask;
+
+    traceEvent(TRACE_NORMAL, "supernode assigned address %s/%s, applied to %s",
+               ip, mask, e->dev.dev_name);
+
+    /* The supernode only learns the address from the next REGISTER_SUPER (it
+     * does not record its own assignment), and until then it keeps the peer at
+     * 0/0, so other edges that register meanwhile get the same address. Forcing
+     * an immediate re-registration closes that window. */
+    e->eee->sn_wait = 2;
+
+    return 1;
 }
 
 void n2n_go_edge_destroy(n2n_go_edge_t *e) {

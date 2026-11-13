@@ -117,6 +117,12 @@ func NewEdge(cfg *config.EdgeConfig) (*Edge, error) {
 	ccfg.sn_num = C.int(len(sn))
 	ccfg.ip = ip
 	ccfg.mask = mask
+	if cfg.AutoAddress {
+		ccfg.auto_address = 1
+	}
+	if cfg.IPv6 {
+		ccfg.ipv6 = 1
+	}
 	ccfg.device = device
 	ccfg.mac = mac
 	ccfg.mtu = C.int(cfg.MTU)
@@ -176,6 +182,25 @@ func (e *Edge) Stop() {
 		return
 	}
 	C.n2n_go_edge_stop(e.handle)
+}
+
+// ConfigureAuto applies the address assigned by the supernode to the utun
+// device. It returns done=true once the device is configured (or when there is
+// nothing left to configure because the edge loop has finished) and done=false
+// while the assignment has not arrived yet. Call it repeatedly while Run is
+// executing; it is a no-op when the edge uses a static address.
+func (e *Edge) ConfigureAuto() (bool, error) {
+	if e == nil || e.handle == nil {
+		return false, errors.New("n2n: edge is closed")
+	}
+	switch rc := int(C.n2n_go_edge_configure_auto(e.handle)); rc {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, errors.New("n2n: failed to apply the supernode-assigned address")
+	}
 }
 
 // Started is closed once the C layer is about to enter run_edge_loop.

@@ -50,9 +50,17 @@ type EdgeConfig struct {
 	Community  string
 	Supernodes []string
 
-	CIDR string // user supplied value, e.g. 10.0.0.1/24
+	CIDR string // user supplied value, e.g. 10.0.0.1/24 or auto
 	IP   string // dotted IPv4 address, filled by SetAddress
 	Mask string // dotted IPv4 netmask, filled by SetAddress
+
+	// AutoAddress is set when the address is assigned by the supernode
+	// (SN_ASSIGN); IP and Mask stay empty until the assignment arrives.
+	AutoAddress bool
+
+	// IPv6 enables carrying IPv6 over the tunnel (--ipv6). The interface keeps
+	// the link-local address macOS assigns; no global IPv6 address is set yet.
+	IPv6 bool
 
 	Key         string
 	Cipher      string // none | aes | cc20 | speck | tf
@@ -172,12 +180,21 @@ func (c *EdgeConfig) Validate() error {
 			return fmt.Errorf("invalid supernode %q: port must be 1-65535", sn)
 		}
 	}
-	if c.IP == "" || c.Mask == "" {
-		if c.CIDR == "" {
-			return fmt.Errorf("address is required (-a IPv4/CIDR)")
-		}
-		if err := c.SetAddress(c.CIDR); err != nil {
-			return err
+	cidr := strings.TrimSpace(c.CIDR)
+	if strings.EqualFold(cidr, "auto") {
+		c.AutoAddress = true
+		c.CIDR = "auto"
+		c.IP = ""
+		c.Mask = ""
+	} else {
+		c.AutoAddress = false
+		if c.IP == "" || c.Mask == "" {
+			if cidr == "" {
+				return fmt.Errorf("address is required (-a IPv4/CIDR or -a auto)")
+			}
+			if err := c.SetAddress(cidr); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -269,6 +286,12 @@ func (c *EdgeConfig) Validate() error {
 	}
 	if _, err := c.CompressionID(); err != nil {
 		return err
+	}
+
+	if c.IPv6 {
+		// IPv6 neighbour discovery rides on 33:33:... multicast, which n2n
+		// filters unless multicast is accepted; -E is therefore implied.
+		c.DropMulticast = false
 	}
 	return nil
 }

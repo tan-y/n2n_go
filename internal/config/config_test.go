@@ -162,3 +162,71 @@ func TestValidateDescription(t *testing.T) {
 		t.Fatalf("expected description error, got %v", err)
 	}
 }
+
+func TestValidateAutoAddress(t *testing.T) {
+	for _, value := range []string{"auto", "AUTO", " Auto "} {
+		c := DefaultEdgeConfig()
+		c.Community = "demo"
+		c.Supernodes = []string{"127.0.0.1:7777"}
+		c.CIDR = value
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate(%q): %v", value, err)
+		}
+		if !c.AutoAddress {
+			t.Fatalf("Validate(%q): AutoAddress = false, want true", value)
+		}
+		if c.IP != "" || c.Mask != "" {
+			t.Fatalf("Validate(%q): ip=%q mask=%q, want empty", value, c.IP, c.Mask)
+		}
+		if c.CIDR != "auto" {
+			t.Fatalf("Validate(%q): CIDR = %q, want auto", value, c.CIDR)
+		}
+	}
+}
+
+// A config file may carry a static address that -a auto overrides; the parsed
+// IP and mask must not leak into SN_ASSIGN mode.
+func TestValidateAutoAddressClearsStatic(t *testing.T) {
+	c := validConfig(t)
+	c.CIDR = "auto"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !c.AutoAddress || c.IP != "" || c.Mask != "" {
+		t.Fatalf("got auto=%v ip=%q mask=%q", c.AutoAddress, c.IP, c.Mask)
+	}
+}
+
+func TestValidateAddressRequiredMentionsAuto(t *testing.T) {
+	c := DefaultEdgeConfig()
+	c.Community = "demo"
+	c.Supernodes = []string{"127.0.0.1:7777"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "auto") {
+		t.Fatalf("expected an address error mentioning auto, got %v", err)
+	}
+}
+
+// IPv6 neighbour discovery uses 33:33:... multicast, which n2n drops unless
+// multicast is accepted, so --ipv6 must imply -E.
+func TestValidateIPv6AcceptsMulticast(t *testing.T) {
+	c := validConfig(t)
+	c.IPv6 = true
+	c.DropMulticast = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if c.DropMulticast {
+		t.Fatal("IPv6 must force DropMulticast to false")
+	}
+}
+
+func TestValidateWithoutIPv6KeepsDropMulticast(t *testing.T) {
+	c := validConfig(t)
+	c.DropMulticast = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !c.DropMulticast {
+		t.Fatal("DropMulticast must stay true when IPv6 is off")
+	}
+}
