@@ -1,6 +1,6 @@
 # macOS 首期实施方案
 
-本文档对应 [N2NGo.md](N2NGo.md) 的 macOS 首期落地计划。按要求，本阶段不做任何 Git 仓库操作（不初始化仓库、不加 submodule、不做版本固定），n2n 源码直接使用本地路径 `/Users/xtao/Work/n2n/n2n`，构建时复制到工作目录。
+本文档对应 [N2NGo.md](N2NGo.md) 的 macOS 首期落地计划，与 [Linux.md](Linux.md)、[Windows.md](Windows.md) 并列。n2n 源码以 Git submodule 固定在 `third_party/n2n`（3.1.1），构建时复制到工作目录。
 
 ## 0. 本机环境探测
 
@@ -583,7 +583,8 @@ sudo ./bin/n2n-darwin-arm64 edge \
 - 组播验证脚本：`scripts/multicast-test.sh`
 - 自动地址验证脚本：`scripts/auto-address-test.sh`
 - IPv6 验证脚本：`scripts/ipv6-test.sh`
-- 原生对端互通脚本：`scripts/interop-test.sh`（容器内跑原生 3.1.1 edge，需 docker）- 文档：本文件 + `docs/N2NGo.md`
+- 原生对端互通脚本：`scripts/interop-test.sh`（容器内跑原生 3.1.1 edge，需 docker）
+- 文档：本文件 + `docs/N2NGo.md`
 - 后续设计：[macOS-p5.md](macOS-p5.md)（IPv6；T0 `-E` 语义、T1 组播、T2 `-a auto`、T3 IPv6 读写路径、T4 IPv6 校验和、T5 原生对端互通均已实测通过）
 
 ## 9. 源码与版本管理

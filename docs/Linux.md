@@ -1,8 +1,24 @@
 # Linux 首期实施方案
 
-本文档对应 [N2NGo.md](N2NGo.md) 的 Linux 首期落地计划，与 [macOS.md](macOS.md) 并列。沿用同样的约束：本阶段不做任何 Git 操作，n2n 源码直接使用本地路径 `/Users/xtao/Work/n2n/n2n`，构建时复制到工作目录。
+本文档对应 [N2NGo.md](N2NGo.md) 的 Linux 首期落地计划，与 [macOS.md](macOS.md)、[Windows.md](Windows.md) 并列。
 
-Linux 与 macOS 的关键差异在设备层：Linux 内核原生提供 TAP（二层以太网），n2n 的 `tuntap_linux.c` 可以直接复用，不需要 macOS 那种 utun（三层）到以太网的转换。因此 Linux 侧代码改动更小，主要工作是构建环境、容器化运行验收、权限模型和跨发行版兼容。
+- n2n 源码以 Git submodule 固定在 `third_party/n2n`（3.1.1），构建时复制到工作目录。
+- Linux 与 macOS 的关键差异在设备层：Linux 内核原生提供 TAP（二层以太网），n2n 的 `tuntap_linux.c` 可以直接复用，不需要 macOS 那种 utun（三层）到以太网的转换。因此 Linux 侧代码改动更小，主要工作是构建环境、容器化运行验收、权限模型和跨发行版兼容。
+
+## 目录
+
+- [0. 本机环境探测](#0-本机环境探测)
+- [1. 首期范围（MVP）](#1-首期范围mvp)
+- [2. 与 macOS 方案的差异](#2-与-macos-方案的差异)
+- [3. 目录结构（新增部分）](#3-目录结构新增部分)
+- [4. 编译环境与产物](#4-编译环境与产物)
+- [5. Linux TAP 适配](#5-linux-tap-适配)
+- [6. 测试方案](#6-测试方案)
+- [7. 任务拆解与验收](#7-任务拆解与验收)
+- [8. 风险与对策](#8-风险与对策)
+- [9. 首期交付物](#9-首期交付物)
+- [10. 源码与版本管理](#10-源码与版本管理)
+- [11. 待确认问题](#11-待确认问题)
 
 ## 0. 本机环境探测
 
@@ -12,7 +28,7 @@ Linux 与 macOS 的关键差异在设备层：Linux 内核原生提供 TAP（二
 | 容器运行时 | Docker 29.8.2，OrbStack 2.2.5，Linux 内核 7.2.12-orbstack arm64 | 可用 |
 | linux/amd64 模拟 | 已验证 `docker run --platform linux/amd64` 返回 `x86_64` | 可在 Apple Silicon 上产出 amd64 产物（较慢） |
 | /dev/net/tun | 已验证容器内存在 `crw-rw-rw- 10,200`（`--device /dev/net/tun --cap-add NET_ADMIN`） | 可以创建 TAP |
-| 容器内工具链 | ubuntu:22.04 上已实测 autoconf/automake/gcc/make，成功产出 `libn2n.a` | 构建路径可行 |
+| 容器内工具链 | 已在 ubuntu:22.04 上实测 autoconf/automake/gcc/make，成功产出 `libn2n.a` | 构建路径可行 |
 | Go | 宿主 go1.25.5 darwin/arm64；容器内需另装 Linux 版 | 由镜像提供 |
 | zig | 未安装 | 不作为主路径 |
 | Nix | 2.35.3 可用 | Linux 构建不需要 |
@@ -21,7 +37,7 @@ Linux 与 macOS 的关键差异在设备层：Linux 内核原生提供 TAP（二
 
 ## 1. 首期范围（MVP）
 
-**实现**
+### 1.1 实现范围
 
 - 单一子命令 `n2n edge`，前台运行，需要 root 或 `CAP_NET_ADMIN`。
 - 目标平台：`linux/amd64`、`linux/arm64`。
@@ -30,20 +46,20 @@ Linux 与 macOS 的关键差异在设备层：Linux 内核原生提供 TAP（二
 - 两套 libc 产物：`glibc`（常规发行版）与 `musl` 静态（单文件、跨发行版）。
 - 构建脚本、工具链镜像、容器冒烟测试。
 
-**明确不做（后续迭代）**
+### 1.2 明确不做（后续迭代）
 
-- `supernode` 子命令（沿用 n2n 自带 `supernode` 做测试）；
-- `armv7` / `386` / `mips` 与 OpenWrt（OpenWrt 单独平台文档）；
-- DHCP 地址模式、IPv6；
-- daemon 化、systemd 单元、安装包（deb/rpm）；
-- 头部加密（`-H`）、联邦认证（`-J/-P`）；
+- `supernode` 子命令（沿用 n2n 自带 `supernode` 做测试）。
+- `armv7` / `386` / `mips` 与 OpenWrt（OpenWrt 单独平台文档）。
+- DHCP 地址模式、IPv6。
+- daemon 化、systemd 单元、安装包（deb/rpm）。
+- 头部加密（`-H`）、联邦认证（`-J/-P`）。
 - 非 root 的 helper / `setcap` 交付形态（首期仍要求 root，见 5.1）。
 
-**验收标准**
+### 1.3 验收标准
 
-1. `scripts/build-linux.sh arm64 musl` 在容器内成功产出 `libn2n.a` 与 `bin/n2n-linux-arm64-musl`，`version` 可运行；
-2. 一个 supernode 容器加两个 edge 容器，两个 edge 均注册成功，容器间 overlay 地址可双向 `ping` 通；
-3. 发送 `SIGINT`/`SIGTERM` 后 edge 退出码为 0，TAP 接口随 fd 关闭被内核删除；
+1. `scripts/build-linux.sh arm64 musl` 在容器内成功产出 `libn2n.a` 与 `bin/n2n-linux-arm64-musl`，`version` 可运行。
+2. 一个 supernode 容器加两个 edge 容器，两个 edge 均注册成功，容器间 overlay 地址可双向 `ping` 通。
+3. 发送 `SIGINT`/`SIGTERM` 后 edge 退出码为 0，TAP 接口随 fd 关闭被内核删除。
 4. 参数错误（社区超长、非法 CIDR、未知算法、非法设备名）在 Go 层直接报错，不进入 C 层。
 
 ## 2. 与 macOS 方案的差异
@@ -84,14 +100,17 @@ n2n_go/
 │   ├── smoke-test-linux.sh       # 容器双节点联调
 │   └── docker-compose.linux.yml  # supernode + edge1 + edge2
 ├── build/
-│   └── n2n-linux-<arch>-<libc>/   # 中间源码与目标文件
-├── third_party/lib/linux/
-│   ├── amd64/                    # cgo 实际链接的规范路径
-│   ├── amd64-glibc/              # 变体归档
-│   ├── amd64-musl/
-│   ├── arm64/
-│   ├── arm64-glibc/
-│   └── arm64-musl/
+│   └── n2n-linux-<arch>-<libc>/  # 中间源码与目标文件
+├── third_party/
+│   ├── n2n/                      # n2n 源码（Git submodule，固定 3.1.1）
+│   ├── n2n-src/include/          # 构建脚本复制的头文件只读副本
+│   └── lib/linux/
+│       ├── amd64/                # cgo 实际链接的规范路径
+│       ├── amd64-glibc/          # 变体归档
+│       ├── amd64-musl/
+│       ├── arm64/
+│       ├── arm64-glibc/
+│       └── arm64-musl/
 └── bin/
     ├── n2n-linux-amd64-glibc
     ├── n2n-linux-amd64-musl
@@ -101,7 +120,8 @@ n2n_go/
 
 说明：
 
-- `build/`、`third_party/lib/`、`bin/` 仍为生成目录，`make clean` 可删除。
+- `build/`、`third_party/lib/`、`third_party/n2n-src/include`、`bin/` 均为生成目录，`make clean` 可删除。
+- `third_party/n2n` 为 Git submodule（3.1.1）；首次克隆后执行 `git submodule update --init third_party/n2n`。
 - cgo 只指向 `third_party/lib/linux/<arch>/libn2n.a` 这个规范路径；构建脚本把当前选择的 libc 变体复制到该位置。同一时刻只激活一个变体，CI 按变体串行构建。
 - `platform/linux/` 目录首期不建：`tuntap_linux.c` 通过 patch 修正，避免复制整份文件；如果后续补丁超过约 30 行，再改为整文件替换（与 macOS 的 `platform/macos/` 方式一致）。
 
@@ -133,7 +153,7 @@ ARG GO_URL=https://golang.google.cn/dl
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl build-essential autoconf automake pkg-config \
-      linux-libc-dev rsync patch \
+      linux-libc-dev rsync patch file \
  && case "$TARGETARCH" in \
       amd64) GOARCH=amd64 ;; \
       arm64) GOARCH=arm64 ;; \
@@ -156,7 +176,7 @@ ARG TARGETARCH
 ARG GO_URL=https://golang.google.cn/dl
 
 RUN apk add --no-cache ca-certificates curl build-base autoconf automake pkgconf \
-      linux-headers rsync patch \
+      linux-headers rsync patch file \
  && case "$TARGETARCH" in \
       amd64) GOARCH=amd64 ;; \
       arm64) GOARCH=arm64 ;; \
@@ -174,12 +194,16 @@ ENV PATH=/usr/local/go/bin:$PATH
 - `glibc` 基线选 Debian 11（glibc 2.31），覆盖 Debian 11+、Ubuntu 20.04+、RHEL 8+；若用 Ubuntu 22.04 构建，产物要求 glibc ≥ 2.35，兼容面会变窄。
 - `musl` 产物完全静态，不依赖目标发行版的 glibc，是首期默认推荐产物。
 - 本机已实测 `ubuntu:22.04` 容器内可完成 autogen/configure/`make libn2n.a`；Debian 11/Alpine 镜像只需在同一脚本下复跑一次即可确认（见任务 T1）。
+- 镜像内额外安装 `file`，供 6.1 的产物类型检查使用。
 
 ### 4.3 容器内构建 n2n 静态库
 
 `scripts/build-n2n-linux.sh`（在容器内执行）关键步骤：
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH=${ARCH:-arm64}
 LIBC=${LIBC:-musl}
@@ -190,9 +214,11 @@ esac
 
 WORK="$ROOT/build/n2n-linux-$ARCH-$LIBC"
 LIB="$ROOT/third_party/lib/linux/$ARCH-$LIBC"
+INCLUDE_DIR="$ROOT/third_party/n2n-src/include"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
+# N2N_SRC 在容器内指向挂载进来的 submodule；宿主脚本默认挂载 third_party/n2n
 rsync -a --exclude build --exclude bin --exclude .git \
       "${N2N_SRC:-/n2n-src}/" "$WORK/"
 
@@ -207,14 +233,19 @@ make libn2n.a
 mkdir -p "$LIB" "$ROOT/third_party/lib/linux/$ARCH"
 cp libn2n.a "$LIB/libn2n.a"
 cp libn2n.a "$ROOT/third_party/lib/linux/$ARCH/libn2n.a"
+
+rm -rf "$INCLUDE_DIR"
+mkdir -p "$INCLUDE_DIR"
+rsync -a include/ "$INCLUDE_DIR/"
 ```
 
 说明：
 
-- Linux 不需要替换 `tuntap_linux.c`；`N2N_OBJS` 中本来就包含 `src/tuntap_linux.o`，文件内部用 `__linux__` 隔离（见 [Makefile](file:///Users/xtao/Work/n2n/n2n/Makefile#L94-L97)）。
+- Linux 不需要替换 `tuntap_linux.c`；`N2N_OBJS` 中本来就包含 `src/tuntap_linux.o`，文件内部用 `__linux__` 隔离（见 [Makefile](file:///Users/xtao/Work/n2n/n2n_go/third_party/n2n/Makefile#L88-L99)）。
 - 仍然保留 `-DSKIP_MULTICAST_PEERS_DISCOVERY`，与 macOS 首期一致，避免局域网组播发现带来的权限、噪音和容器网络差异；后续做局域网发现时再评估放开。
-- `--enable-pthread` 保持默认关闭；n2n 只在启用该选项时才链接 pthread（见 [configure.ac](file:///Users/xtao/Work/n2n/n2n/configure.ac#L109-L116)）。
+- `--enable-pthread` 保持默认关闭；n2n 只在启用该选项时才链接 pthread（见 [configure.ac](file:///Users/xtao/Work/n2n/n2n_go/third_party/n2n/configure.ac#L109-L116)）。
 - 不启用 `zstd`/`openssl`/`libcap`/`pcap`/`miniupnpc`/`natpmp`，避免额外系统库依赖。
+- 头文件在每次构建后复制到 `third_party/n2n-src/include/`，使 cgo 只依赖仓库内副本，`build/` 可随时清理。
 
 ### 4.4 Go 侧 cgo 配置
 
@@ -237,7 +268,7 @@ import "C"
 
 - 直接链接 `libn2n.a`，不使用 `-ln2n`，避免运行时搜索路径问题。
 - Linux 默认不需要额外系统库：n2n 默认未启用 pthread，Go 运行时会自行处理线程库；不启用 zstd/openssl 时也不需要 `-lzstd`/`-lcrypto`。如果后续开启 `--enable-pthread`，在 LDFLAGS 中补 `-lpthread`。
-- cgo 的 CFLAGS 沿用 [edge.go](../internal/n2n/edge.go#L5-L9) 中的 `-I third_party/n2n-src/include -DSKIP_MULTICAST_PEERS_DISCOVERY`，Linux 无需额外头文件路径。
+- cgo 的 CFLAGS 沿用 [edge.go](../internal/n2n/edge.go#L5-L10) 中的 `-I third_party/n2n-src/include -DSKIP_MULTICAST_PEERS_DISCOVERY`，Linux 无需额外头文件路径。
 - 一个变体构建完成后再构建另一个变体，避免规范路径 `third_party/lib/linux/<arch>/libn2n.a` 被覆盖导致链接错库。
 
 ### 4.5 宿主入口脚本
@@ -245,14 +276,22 @@ import "C"
 `scripts/build-linux.sh <arch> <glibc|musl>`：
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ARCH=${1:?usage: build-linux.sh <amd64|arm64> <glibc|musl>}
+LIBC=${2:?usage: build-linux.sh <amd64|arm64> <glibc|musl>}
+N2N_SRC_HOST=${N2N_SRC_HOST:-$ROOT/third_party/n2n}
+
 docker build --platform "linux/$ARCH" \
-  -f "docker/linux/Dockerfile.$LIBC" \
-  -t "n2n-go-build:linux-$ARCH-$LIBC" docker/linux
+  -f "$ROOT/docker/linux/Dockerfile.$LIBC" \
+  -t "n2n-go-build:linux-$ARCH-$LIBC" "$ROOT/docker/linux"
 
 docker run --rm --platform "linux/$ARCH" \
   -e ARCH="$ARCH" -e LIBC="$LIBC" -e N2N_SRC=/n2n-src \
-  -v "$PWD":/work -w /work \
-  -v "${N2N_SRC_HOST:-/Users/xtao/Work/n2n/n2n}":/n2n-src:ro \
+  -v "$ROOT":/work -w /work \
+  -v "$N2N_SRC_HOST":/n2n-src:ro \
   "n2n-go-build:linux-$ARCH-$LIBC" \
   ./scripts/build-n2n-linux.sh
 ```
@@ -272,7 +311,7 @@ fi
 
 要点：
 
-- `musl` 静态产物必须显式 `-linkmode external -extldflags "-static"`；只设置 `CGO_ENABLED=1` 仍会动态链接 musl。
+- `musl` 静态产物必须显式使用 `-linkmode external -extldflags "-static"`；只设置 `CGO_ENABLED=1` 仍会动态链接 musl。
 - 可选 `GOPROXY=https://goproxy.cn,direct`；项目当前没有第三方 Go 依赖，影响不大。
 - 可选把 `~/.cache/go-build` 挂进容器，减少重复构建时间。
 - bind mount 写回产物在 Linux 宿主上可能变成 root 所有；macOS 的 OrbStack/Docker Desktop 一般会做 uid 映射。CI 中建议在容器内打包产物，或使用 `--user` 运行 Go 构建阶段。
@@ -299,29 +338,31 @@ fi
 | cgo 报 `unrecognized command-line option '-arch'` | 误用了 macOS 的 CFLAGS | Linux 构建脚本不要带 `-arch`、`-mmacosx-version-min` |
 | `ld: cannot find -ln2n` | 规范路径库缺失或变体未复制 | 先跑 `build-n2n-linux.sh`，确认 `third_party/lib/linux/<arch>/libn2n.a` 存在 |
 | 运行时报 `GLIBC_2.xx not found` | glibc 基线过新 | 改用 musl 静态产物，或在更老基线镜像中重建 |
-| TUNSETIFF 返回 `Operation not permitted` | 缺 `CAP_NET_ADMIN` | 以 root 运行，或容器加 `--cap-add NET_ADMIN --device /dev/net/tun` |
+| `TUNSETIFF` 返回 `Operation not permitted` | 缺 `CAP_NET_ADMIN` | 以 root 运行，或容器加 `--cap-add NET_ADMIN --device /dev/net/tun` |
 
 ## 5. Linux TAP 适配
 
 ### 5.1 内核与权限
 
-- 依赖 `/dev/net/tun` 与内核 `CONFIG_TUN`；多数发行版默认已加载 `tun` 模块，缺失时 `sudo modprobe tun`。
+- 依赖 `/dev/net/tun` 与内核 `CONFIG_TUN`；多数发行版默认已加载 `tun` 模块，缺失时执行 `sudo modprobe tun`。
 - 创建/配置 TAP 需要 `CAP_NET_ADMIN`：`TUNSETIFF`、`SIOCSIFHWADDR`、`SIOCSIFADDR`、`SIOCSIFNETMASK`、`SIOCSIFMTU`、`SIOCSIFFLAGS` 均受该能力约束；不需要 `CAP_NET_RAW`。
-- 首期沿用 CLI 的 `os.Geteuid() == 0` 检查（[edge.go](../internal/cli/edge.go#L92-L95)），提示语改为 root 或 `CAP_NET_ADMIN`。
-- 容器需要：
+- 首期沿用 CLI 的 `os.Geteuid() == 0` 检查（[edge.go](../internal/cli/edge.go#L166-L169)），提示语改为 root 或 `CAP_NET_ADMIN`。
+
+容器运行参数：
 
 ```bash
 docker run --cap-add NET_ADMIN --device /dev/net/tun ...
 ```
 
-或测试场景直接 `--privileged`。Kubernetes 需 privileged / device plugin，首期不展开。
-- 可选的非 root 方案：`setcap cap_net_admin+ep bin/n2n-linux-amd64-musl`。但当前 CLI 的 euid 检查会先拒绝，若采用该方案需改成“尝试创建 TAP，失败时把 EPERM 翻译成权限提示”，首期不做。
+测试场景可直接使用 `--privileged`。Kubernetes 需 privileged / device plugin，首期不展开。
+
+可选的非 root 方案：`setcap cap_net_admin+ep bin/n2n-linux-amd64-musl`。但当前 CLI 的 euid 检查会先拒绝；若采用该方案，需改成“尝试创建 TAP，失败时把 EPERM 翻译成权限提示”，首期不做。
 
 ### 5.2 复用 `tuntap_linux.c` 与补丁
 
 Linux 的 TAP 逻辑已经完整，不需要像 macOS 那样重写。首期只做一组小修正，放在 `patches/n2n-tuntap-linux.patch`：
 
-| 问题 | 现状（[tuntap_linux.c](file:///Users/xtao/Work/n2n/n2n/src/tuntap_linux.c)） | 修正 |
+| 问题 | 现状（[tuntap_linux.c](file:///Users/xtao/Work/n2n/n2n_go/third_party/n2n/src/tuntap_linux.c)） | 修正 |
 | --- | --- | --- |
 | `if_idx` 取值错误 | `device->if_idx = if_nametoindex(dev)`（L251）；`dev` 为空时返回 0，自动分配 `tapN` 时拿不到真实索引 | 改为 `if_nametoindex(device->dev_name)` |
 | `mtu` 字段未赋值 | 只在 `SIOCSIFMTU` 中设置内核 MTU，`device->mtu` 结构体字段保持 0 | 补 `device->mtu = (uint16_t)mtu` |
@@ -333,20 +374,20 @@ Linux 的 TAP 逻辑已经完整，不需要像 macOS 那样重写。首期只�
 
 保留原生行为：
 
-- `/dev/net/tun` + `TUNSETIFF` 申请 `IFF_TAP|IFF_NO_PI`，读写的是完整以太网帧；
-- 设置 MAC、IP、掩码、MTU，最后置 `IFF_UP|IFF_RUNNING`；
-- 通过 `NETLINK_ROUTE` 订阅链路事件，等待接口进入 up 状态；
+- `/dev/net/tun` + `TUNSETIFF` 申请 `IFF_TAP|IFF_NO_PI`，读写的是完整以太网帧。
+- 设置 MAC、IP、掩码、MTU，最后置 `IFF_UP|IFF_RUNNING`。
+- 通过 `NETLINK_ROUTE` 订阅链路事件，等待接口进入 up 状态。
 - `tuntap_read`/`tuntap_write` 直接读写 fd，无需任何帧格式转换。
 
 ### 5.3 设备命名与 Go 层校验
 
 macOS 的设备名必须是 `utun`/`utunN`；Linux 则允许任意合法接口名（≤ 15 字节），也允许留空由内核自动分配 `tapN`。因此把相关逻辑拆到平台文件：
 
-- `internal/config/device_darwin.go`：保持现有 `utun`/`utunN` 规则；
-- `internal/config/device_linux.go`：空名合法（自动分配）；非空时校验长度 ≤ 15、字符集 `[A-Za-z0-9_.-]`，拒绝 `/`、空白、`:` 等；
-- [config.go](../internal/config/config.go#L173-L181) 与 `DefaultEdgeConfig` 中的 `Device: "utun"` 改为调用平台函数 `defaultDeviceName()` / `validateDeviceName()`；
-- [CLI edge.go](../internal/cli/edge.go#L52-L53) 当前把 `-d` 默认值硬编码为 `utun`，改为取 `cfg.Device` 的平台默认值，帮助文本改为“Linux 默认自动分配 tapN；macOS 默认 utunN”；
-- [edge_glue.c](../internal/n2n/edge_glue.c#L178-L180) 的兜底设备名从 `"utun"` 改为 `""`，错误信息从 `failed to open utun device` 改为 `failed to open TUN/TAP device`；
+- `internal/config/device_darwin.go`：保持现有 `utun`/`utunN` 规则。
+- `internal/config/device_linux.go`：空名合法（自动分配）；非空时校验长度 ≤ 15、字符集 `[A-Za-z0-9_.-]`，拒绝 `/`、空白、`:` 等。
+- [DefaultEdgeConfig](../internal/config/config.go#L89-L93) 中的 `Device: "utun"` 与 [设备名校验](../internal/config/config.go#L201-L208) 改为调用平台函数 `defaultDeviceName()` / `validateDeviceName()`。
+- [CLI edge.go](../internal/cli/edge.go#L121-L122) 当前把 `-d` 默认值硬编码为 `utun`，改为取 `cfg.Device` 的平台默认值，帮助文本改为“Linux 默认自动分配 tapN；macOS 默认 utunN”。
+- [edge_glue.c](../internal/n2n/edge_glue.c#L240-L245) 的兜底设备名从 `"utun"` 改为 `""`，错误信息从 `failed to open utun device` 改为 `failed to open TUN/TAP device`。
 - 新增 C 接口 `n2n_go_edge_device_name()` 与 Go 方法 `Edge.DeviceName()`，在 `NewEdge` 成功后打印实际设备名（自动分配的 `tapN` 对用户可见）；`tuntap_priv_conf.tuntap_dev_name` 已经使用 `e->dev.dev_name`，重开设备时能拿到真实名字。
 
 ### 5.4 参数映射
@@ -402,11 +443,13 @@ docker run --rm --platform linux/arm64 -v "$PWD":/work -w /work \
   n2n-go-build:linux-arm64-musl sh -c 'file bin/n2n-linux-arm64-musl; ldd bin/n2n-linux-arm64-musl || true'
 ```
 
-`file` 显示 `ELF 64-bit LSB executable, ARM aarch64, statically linked`；`ldd` 显示没有动态依赖（glibc 的 `ldd` 输出 `not a dynamic executable`，musl 环境通常输出 `statically linked`）。
+`file` 显示 `ELF 64-bit LSB executable, ARM aarch64, statically linked`；`ldd` 显示没有动态依赖（glibc 环境输出 `not a dynamic executable`，musl 环境通常输出 `statically linked`）。
 
 ### 6.2 容器双节点联调（主路径）
 
-运行镜像与工具链镜像分开：工具链镜像只负责编译，运行镜像从 `alpine:3.20` 构建，装入 `iproute2`（`ip` 命令）和 `iputils`（`ping`），再复制 `n2n` 与测试用 `supernode`（在 `build/n2n-linux-<arch>-<libc>/` 中 `make supernode` 产出）。`scripts/docker-compose.linux.yml` 示意：
+运行镜像与工具链镜像分开：工具链镜像只负责编译；运行镜像基于 `alpine:3.20`，装入 `iproute2`（`ip` 命令）和 `iputils`（`ping`），再复制 `n2n` 与测试用 `supernode`（在 `build/n2n-linux-<arch>-<libc>/` 中执行 `make supernode` 产出）。
+
+`scripts/docker-compose.linux.yml` 示意：
 
 ```yaml
 services:
@@ -465,9 +508,9 @@ docker compose -f scripts/docker-compose.linux.yml exec edge1 ip neigh
 
 断言：
 
-- 两个 edge 都在 30 秒内完成首次注册；
-- `ping` 0% 丢包（Linux TAP 是真实二层，容器是独立 netns，不存在 macOS 同机 ICMP 限制）；
-- 两侧 `tap0` 的 RX/TX 计数随 ping 增长；
+- 两个 edge 都在 30 秒内完成首次注册。
+- `ping` 0% 丢包（Linux TAP 是真实二层，容器是独立 netns，不存在 macOS 同机 ICMP 限制）。
+- 两侧 `tap0` 的 RX/TX 计数随 ping 增长。
 - `ip neigh` 中出现对端 MAC（ARP 通过 n2n 广播送达）。
 
 退出与清理：
@@ -482,8 +525,8 @@ docker compose -f scripts/docker-compose.linux.yml stop
 
 注意：
 
-- 每个 edge 容器必须加 `NET_ADMIN` 与 `/dev/net/tun`，否则 `TUNSETIFF` 直接失败；
-- 两个 edge 在不同容器/不同 netns 中，管理端口可以用默认值，不会冲突；
+- 每个 edge 容器必须加 `NET_ADMIN` 与 `/dev/net/tun`，否则 `TUNSETIFF` 直接失败。
+- 两个 edge 在不同容器/不同 netns 中，管理端口可以用默认值，不会冲突。
 - 若用 `--privileged` 跑测试，可省去单独的 cap/device 配置，但生产不建议。
 
 ### 6.3 宿主机 netns 联调（备选）
@@ -523,8 +566,8 @@ ip netns delete edge1 edge2
 
 ### 6.4 退出与残留检查
 
-- Linux 的 TAP 不是持久设备（未使用 `TUNSETPERSIST`），进程退出后接口自动消失；
-- 若接口仍存在，说明进程未退出或使用了持久化配置，按 `pkill -f "bin/n2n-linux"` 处理后复查；
+- Linux 的 TAP 不是持久设备（未使用 `TUNSETPERSIST`），进程退出后接口自动消失。
+- 若接口仍存在，说明进程未退出或使用了持久化配置，按 `pkill -f "bin/n2n-linux"` 处理后复查。
 - 路由随接口删除自动清理；容器方案则随 netns 销毁。
 
 ## 7. 任务拆解与验收
@@ -549,7 +592,8 @@ ip netns delete edge1 edge2
 | 容器缺 `CAP_NET_ADMIN` | `TUNSETIFF` 失败 | 文档明确 `--cap-add NET_ADMIN --device /dev/net/tun`；测试可用 privileged |
 | netlink 等待卡住 | edge 启动挂起 | 补丁加超时 + `SIOCGIFFLAGS` 兜底（见 5.2） |
 | 同机双节点路由冲突 | ping 不通、误判 | 首期测试固定用独立 netns/容器，不承诺同 netns 双节点互通 |
-| n2n 升级导致补丁失效 | 构建中断 | 补丁脚本化；CI 在每次升级时先应用补丁再编译 |
+| n2n 升级导致补丁失效 | 构建中断 | 补丁脚本化；升级 submodule 后先应用补丁再编译 |
+| submodule 未初始化 | 构建时找不到 n2n 源码 | 构建脚本检查 `third_party/n2n`，提示执行 `git submodule update --init` |
 | amd64 模拟构建慢 | 本地迭代效率低 | CI 用原生 amd64 runner；本地优先 arm64，必要时 buildx 缓存 |
 | 静态 musl 与 NSS | 若后续启用 `-u/-g`，用户/组解析受限 | 首期不启用权限下降；后续改用 glibc 产物或显式数字 uid/gid |
 | 非 root 运行诉求 | 用户不愿 sudo | 后续迭代引入 setcap 或 helper，并改造权限检测 |
@@ -560,17 +604,18 @@ ip netns delete edge1 edge2
 
 - 可执行文件：`bin/n2n-linux-amd64-{glibc,musl}`、`bin/n2n-linux-arm64-{glibc,musl}`
 - 静态库：`third_party/lib/linux/<arch>-<libc>/libn2n.a`
+- 源码：`third_party/n2n`（Git submodule，固定 3.1.1）
 - 构建镜像：`docker/linux/Dockerfile.glibc`、`docker/linux/Dockerfile.musl`
 - 构建脚本：`scripts/build-linux.sh`、`scripts/build-n2n-linux.sh`
 - 补丁：`patches/n2n-tuntap-linux.patch`
 - 测试：`scripts/docker-compose.linux.yml`、`scripts/smoke-test-linux.sh`
 - 文档：本文件 + `docs/N2NGo.md` + `docs/macOS.md`
 
-## 10. 不做 Git 操作的说明
+## 10. 源码与版本管理
 
-- 不执行 `git init`、不添加 `.gitignore`、不引入 submodule；
-- n2n 源码每次从 `N2N_SRC`（默认 `/Users/xtao/Work/n2n/n2n`）复制，构建产物与源码分离；
-- 若后续需要固定版本，再单独补充 Git 方案。
+- n2n 源码以 Git submodule 固定在 `third_party/n2n`（3.1.1）；首次克隆后执行 `git submodule update --init third_party/n2n`。
+- 构建脚本默认从该 submodule 复制源码到 `build/n2n-linux-<arch>-<libc>/`，构建产物与源码分离；可用 `N2N_SRC` 覆盖为其他源码路径。
+- 升级 n2n 时更新 submodule 指针，并重新验证 `patches/` 下的补丁与冒烟测试。
 
 ## 11. 待确认问题
 
