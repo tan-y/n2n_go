@@ -1,6 +1,7 @@
 package config
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -146,12 +147,26 @@ func TestValidateSupernodeAndMTU(t *testing.T) {
 func TestValidateDevice(t *testing.T) {
 	c := validConfig(t)
 	c.Device = "tap0"
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "utun") {
-		t.Fatalf("expected utun-only error, got %v", err)
+	err := c.Validate()
+	if runtime.GOOS == "darwin" {
+		if err == nil || !strings.Contains(err.Error(), "utun") {
+			t.Fatalf("expected utun-only error, got %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("tap0 should be valid on %s: %v", runtime.GOOS, err)
 	}
+
 	c.Device = "utun7"
 	if err := c.Validate(); err != nil {
 		t.Fatalf("utun7 should be valid: %v", err)
+	}
+
+	if runtime.GOOS != "darwin" {
+		c = validConfig(t)
+		c.Device = "bad name"
+		if err := c.Validate(); err == nil {
+			t.Fatal("expected invalid device name error")
+		}
 	}
 }
 

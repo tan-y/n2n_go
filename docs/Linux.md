@@ -498,16 +498,15 @@ docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml exec -T ed
 - `ping` 0% 丢包（Linux TAP 是真实二层，容器是独立 netns，不存在 macOS 同机 ICMP 限制）。
 - 两侧 `tap0` 的 RX/TX 计数随 ping 增长。
 - `ip neigh` 中出现对端 MAC（ARP 通过 n2n 广播送达）。
+- 冒烟脚本另起独立容器，留空设备名启动 edge，确认内核自动分配 `tapN`、启动日志打印真实设备名；收到 SIGTERM/SIGINT 后退出码为 0，且 TAP 接口随即消失。
 
 退出与清理：
 
 ```bash
 docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml down --remove-orphans
-# edge 容器的退出码应为 0（可用 docker compose up --abort-on-container-exit 捕获）
-# TAP 位于容器 netns，容器销毁时随 netns 一起消失；
-# 若需显式验证接口删除，使用 6.3 的 netns 方案，在 edge 收到 SIGTERM 后执行
-#   ip netns exec edge1 ip link show tap0   # 应报 Device "tap0" does not exist
 ```
+
+生命周期断言已由 `smoke-test-linux.sh` 覆盖；`compose down` 只做资源兜底。
 
 注意：
 

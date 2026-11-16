@@ -55,7 +55,7 @@ func TestLoadFileAppliesFields(t *testing.T) {
 	if c.DropMulticast {
 		t.Error("DropMulticast should be disabled by the file")
 	}
-	if c.Device != "utun" {
+	if c.Device != defaultDeviceName() {
 		t.Errorf("Device = %q, omitted fields must keep their default", c.Device)
 	}
 

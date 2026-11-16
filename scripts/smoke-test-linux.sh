@@ -72,4 +72,41 @@ done
 echo "==> interface counters"
 docker compose -p n2n-linux-smoke -f "$COMPOSE" exec -T edge1 ip -s link show tap0
 
+echo "==> lifecycle: auto tapN, signal exit code, TAP cleanup"
+for sig in TERM INT; do
+  echo "--- SIG$sig ---"
+  docker run --rm --platform "linux/$ARCH" \
+    --cap-add NET_ADMIN --device-cgroup-rule 'c 10:200 rwm' \
+    -e SIG="$sig" "$IMAGE" sh -c '
+      mkdir -p /dev/net
+      [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200
+      /usr/local/bin/n2n edge -c lifecycle -k lifecycle -a 10.9.0.1/24 \
+        -l 127.0.0.1:7777 >/tmp/edge.log 2>&1 &
+      pid=$!
+      for _ in $(seq 1 30); do
+        grep -q "device=tap" /tmp/edge.log && break
+        sleep 0.2
+      done
+      cat /tmp/edge.log
+      dev=$(ip -o link show type tun | awk -F": " "NR==1 {print \$2}")
+      if [ -z "$dev" ]; then
+        echo "FAIL: no auto-assigned tap device"
+        exit 3
+      fi
+      kill -"$SIG" "$pid"
+      wait "$pid"
+      rc=$?
+      sleep 1
+      if ip link show "$dev" >/dev/null 2>&1; then
+        echo "FAIL: $dev still exists after SIG$SIG"
+        exit 4
+      fi
+      if [ "$rc" -ne 0 ]; then
+        echo "FAIL: edge exit code $rc after SIG$SIG"
+        exit 5
+      fi
+      echo "PASS: $dev removed, exit code 0"
+    '
+done
+
 echo "==> smoke test passed"
