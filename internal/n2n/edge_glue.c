@@ -238,10 +238,10 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
     tuntap_osx_enable_ipv6(cfg->ipv6);
 #endif
 
-    if(tuntap_open(&e->dev, (char *)((cfg->device != NULL) ? cfg->device : "utun"),
+    if(tuntap_open(&e->dev, (char *)((cfg->device != NULL) ? cfg->device : ""),
                    cfg->auto_address ? "sn_assign" : "static",
                    (char *)ip, (char *)mask, cfg->mac, cfg->mtu, 0) < 0) {
-        set_err(errbuf, errbuf_len, "failed to open utun device (root privileges required?)");
+        set_err(errbuf, errbuf_len, "failed to open TUN/TAP device (root or CAP_NET_ADMIN required?)");
         cleanup(e);
         free(e);
         return NULL;
@@ -353,4 +353,10 @@ void n2n_go_edge_destroy(n2n_go_edge_t *e) {
 
 const char *n2n_go_version(void) {
     return PACKAGE_VERSION;
+}
+
+const char *n2n_go_edge_device_name(n2n_go_edge_t *e) {
+    if((e == NULL) || (e->dev.dev_name[0] == '\0'))
+        return NULL;
+    return e->dev.dev_name;
 }

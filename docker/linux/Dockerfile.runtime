@@ -1,0 +1,8 @@
+FROM alpine:3.20
+
+ARG ARCH=arm64
+
+RUN apk add --no-cache iproute2 iputils
+
+COPY n2n-linux-${ARCH}-musl /usr/local/bin/n2n
+COPY supernode-linux-${ARCH}-musl /usr/local/bin/supernode

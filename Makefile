@@ -2,7 +2,7 @@ GO        ?= go
 N2N_SRC   ?= $(CURDIR)/third_party/n2n
 NIX_SHELL ?= /nix/var/nix/profiles/default/bin/nix-shell
 
-.PHONY: all n2n-lib n2n-lib-amd64 build build-amd64 build-all test vet check smoke multicast auto-address ipv6 interop clean shell
+.PHONY: all n2n-lib n2n-lib-amd64 build build-amd64 build-all test vet check smoke multicast auto-address ipv6 interop linux-arm64 linux-arm64-glibc linux-amd64 linux-amd64-glibc linux-smoke linux-smoke-glibc linux-clean clean shell
 
 all: build
 
@@ -48,6 +48,27 @@ ipv6:
 
 interop:
 	./scripts/interop-test.sh
+
+linux-arm64:
+	./scripts/build-linux.sh arm64 musl
+
+linux-arm64-glibc:
+	./scripts/build-linux.sh arm64 glibc
+
+linux-amd64:
+	./scripts/build-linux.sh amd64 musl
+
+linux-amd64-glibc:
+	./scripts/build-linux.sh amd64 glibc
+
+linux-smoke:
+	./scripts/smoke-test-linux.sh
+
+linux-smoke-glibc:
+	./scripts/smoke-test-linux.sh glibc
+
+linux-clean:
+	rm -rf build/n2n-linux-* third_party/lib/linux bin/n2n-linux-* bin/supernode-linux-*
 
 clean:
 	rm -rf build bin third_party/lib third_party/n2n-src

@@ -1,0 +1,18 @@
+FROM alpine:3.20
+
+ARG GO_VERSION=1.25.5
+ARG TARGETARCH=arm64
+ARG GO_URL=https://golang.google.cn/dl
+
+RUN apk add --no-cache \
+      bash ca-certificates curl build-base autoconf automake pkgconf \
+      linux-headers rsync patch file \
+ && case "$TARGETARCH" in \
+      amd64) GOARCH=amd64 ;; \
+      arm64) GOARCH=arm64 ;; \
+      *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "$GO_URL/go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
+      | tar -C /usr/local -xz
+
+ENV PATH=/usr/local/go/bin:$PATH

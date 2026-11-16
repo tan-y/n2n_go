@@ -1,0 +1,23 @@
+FROM debian:11-slim
+
+ARG GO_VERSION=1.25.5
+ARG TARGETARCH=arm64
+ARG GO_URL=https://golang.google.cn/dl
+
+RUN sed -i -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian-archive/debian|g' \
+           -e 's|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-archive/debian-security|g' /etc/apt/sources.list \
+ && sed -i '/bullseye-updates/d' /etc/apt/sources.list \
+ && apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential autoconf automake pkg-config \
+      linux-libc-dev rsync patch file \
+ && case "$TARGETARCH" in \
+      amd64) GOARCH=amd64 ;; \
+      arm64) GOARCH=arm64 ;; \
+      *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "$GO_URL/go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
+      | tar -C /usr/local -xz \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV PATH=/usr/local/go/bin:$PATH

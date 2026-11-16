@@ -89,7 +89,7 @@ type EdgeConfig struct {
 func DefaultEdgeConfig() EdgeConfig {
 	return EdgeConfig{
 		Compression:           "none",
-		Device:                "utun",
+		Device:                defaultDeviceName(),
 		MTU:                   DefaultMTU,
 		MgmtPort:              DefaultMgmtPort,
 		RegisterInterval:      DefaultRegisterInterval,
@@ -199,13 +199,13 @@ func (c *EdgeConfig) Validate() error {
 	}
 
 	if c.Device == "" {
-		c.Device = "utun"
+		c.Device = defaultDeviceName()
 	}
 	if len(c.Device) >= DeviceNameMax {
 		return fmt.Errorf("device name %q is too long: max %d bytes", c.Device, DeviceNameMax-1)
 	}
-	if !isUTUNName(c.Device) {
-		return fmt.Errorf("device name %q is not supported: macOS 首期仅支持 utun 或 utunN", c.Device)
+	if err := validateDeviceName(c.Device); err != nil {
+		return err
 	}
 
 	if c.MTU == 0 {
@@ -294,17 +294,6 @@ func (c *EdgeConfig) Validate() error {
 		c.DropMulticast = false
 	}
 	return nil
-}
-
-func isUTUNName(name string) bool {
-	if name == "utun" {
-		return true
-	}
-	if !strings.HasPrefix(name, "utun") {
-		return false
-	}
-	_, err := strconv.Atoi(name[4:])
-	return err == nil
 }
 
 // randomMAC returns a random unicast, locally administered MAC address.

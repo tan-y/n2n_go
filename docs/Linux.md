@@ -57,7 +57,7 @@
 
 ### 1.3 验收标准
 
-1. `scripts/build-linux.sh arm64 musl` 在容器内成功产出 `libn2n.a` 与 `bin/n2n-linux-arm64-musl`，`version` 可运行。
+1. `scripts/build-linux.sh arm64 musl` 与 `scripts/build-linux.sh arm64 glibc` 在容器内成功产出 `libn2n.a`、`bin/n2n-linux-arm64-{musl,glibc}`，`version` 可运行；glibc 产物符号版本不高于 2.31。
 2. 一个 supernode 容器加两个 edge 容器，两个 edge 均注册成功，容器间 overlay 地址可双向 `ping` 通。
 3. 发送 `SIGINT`/`SIGTERM` 后 edge 退出码为 0，TAP 接口随 fd 关闭被内核删除。
 4. 参数错误（社区超长、非法 CIDR、未知算法、非法设备名）在 Go 层直接报错，不进入 C 层。
@@ -83,8 +83,10 @@ Linux 不需要 L3→L2 桥接，因此 [platform/macos/tuntap_osx.c](../platfor
 ```
 n2n_go/
 ├── docker/linux/
-│   ├── Dockerfile.glibc          # Debian 11 基线（glibc 2.31）
-│   └── Dockerfile.musl           # Alpine（musl 静态）
+│   ├── Dockerfile.glibc            # Debian 11 基线（glibc 2.31）
+│   ├── Dockerfile.musl             # Alpine（musl 静态）
+│   ├── Dockerfile.runtime          # musl 运行镜像（Alpine）
+│   └── Dockerfile.runtime.glibc    # glibc 运行镜像（Debian 11）
 ├── patches/
 │   └── n2n-tuntap-linux.patch    # tuntap_linux.c 的小修正
 ├── internal/
@@ -115,7 +117,9 @@ n2n_go/
     ├── n2n-linux-amd64-glibc
     ├── n2n-linux-amd64-musl
     ├── n2n-linux-arm64-glibc
-    └── n2n-linux-arm64-musl
+    ├── n2n-linux-arm64-musl
+    ├── supernode-linux-arm64-glibc
+    └── supernode-linux-arm64-musl
 ```
 
 说明：
@@ -147,10 +151,13 @@ n2n_go/
 FROM debian:11-slim
 
 ARG GO_VERSION=1.25.5
-ARG TARGETARCH
+ARG TARGETARCH=arm64
 ARG GO_URL=https://golang.google.cn/dl
 
-RUN apt-get update \
+RUN sed -i -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian-archive/debian|g' \
+           -e 's|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-archive/debian-security|g' /etc/apt/sources.list \
+ && sed -i '/bullseye-updates/d' /etc/apt/sources.list \
+ && apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl build-essential autoconf automake pkg-config \
       linux-libc-dev rsync patch file \
@@ -172,10 +179,10 @@ ENV PATH=/usr/local/go/bin:$PATH
 FROM alpine:3.20
 
 ARG GO_VERSION=1.25.5
-ARG TARGETARCH
+ARG TARGETARCH=arm64
 ARG GO_URL=https://golang.google.cn/dl
 
-RUN apk add --no-cache ca-certificates curl build-base autoconf automake pkgconf \
+RUN apk add --no-cache bash ca-certificates curl build-base autoconf automake pkgconf \
       linux-headers rsync patch file \
  && case "$TARGETARCH" in \
       amd64) GOARCH=amd64 ;; \
@@ -191,10 +198,11 @@ ENV PATH=/usr/local/go/bin:$PATH
 要点：
 
 - 不在镜像里用发行版自带的 Go（Debian 11 / Ubuntu 22.04 的 apt 版本过旧，无法满足 `go.mod` 的 `go 1.25`），统一安装官方 tarball；国内网络使用 `golang.google.cn` 或 `mirrors.aliyun.com/golang`。
-- `glibc` 基线选 Debian 11（glibc 2.31），覆盖 Debian 11+、Ubuntu 20.04+、RHEL 8+；若用 Ubuntu 22.04 构建，产物要求 glibc ≥ 2.35，兼容面会变窄。
+- `glibc` 基线选 Debian 11（glibc 2.31），覆盖 Debian 11+、Ubuntu 20.04+、RHEL 8+；若用 Ubuntu 22.04 构建，产物要求 glibc ≥ 2.35，兼容面会变窄。Debian 11 已归档，Dockerfile 构建时切换到 `http://mirrors.aliyun.com/debian-archive/`（HTTP，slim 镜像尚未安装 CA 证书），并关闭 `Valid-Until` 检查。
 - `musl` 产物完全静态，不依赖目标发行版的 glibc，是首期默认推荐产物。
 - 本机已实测 `ubuntu:22.04` 容器内可完成 autogen/configure/`make libn2n.a`；Debian 11/Alpine 镜像只需在同一脚本下复跑一次即可确认（见任务 T1）。
 - 镜像内额外安装 `file`，供 6.1 的产物类型检查使用。
+- `Dockerfile.runtime` 只做运行环境（alpine + iproute2/iputils），由 `build-linux.sh` 在产物生成后自动构建为 `n2n-go-linux:<arch>-<libc>`。
 
 ### 4.3 容器内构建 n2n 静态库
 
@@ -322,10 +330,12 @@ fi
 | --- | --- |
 | `make linux-arm64` | `scripts/build-linux.sh arm64 musl` |
 | `make linux-amd64` | `scripts/build-linux.sh amd64 musl` |
-| `make linux-glibc-arm64` | `scripts/build-linux.sh arm64 glibc` |
-| `make linux-glibc-amd64` | `scripts/build-linux.sh amd64 glibc` |
+| `make linux-arm64-glibc` | `scripts/build-linux.sh arm64 glibc` |
+| `make linux-amd64-glibc` | `scripts/build-linux.sh amd64 glibc` |
 | `make linux-smoke` | 构建 arm64 musl 后执行 `scripts/smoke-test-linux.sh` |
-| `make linux-clean` | 删除 `build/n2n-linux-*`、`third_party/lib/linux/`、`bin/n2n-linux-*` |
+| `make linux-smoke` | musl 双节点容器联调 |
+| `make linux-smoke-glibc` | glibc 双节点容器联调 |
+| `make linux-clean` | 删除 `build/n2n-linux-*`、`third_party/lib/linux/`、`bin/n2n-linux-*`、`bin/supernode-linux-*` |
 | `make clean` | 追加删除上述 Linux 产物 |
 
 ### 4.7 常见构建问题
@@ -447,63 +457,39 @@ docker run --rm --platform linux/arm64 -v "$PWD":/work -w /work \
 
 ### 6.2 容器双节点联调（主路径）
 
-运行镜像与工具链镜像分开：工具链镜像只负责编译；运行镜像基于 `alpine:3.20`，装入 `iproute2`（`ip` 命令）和 `iputils`（`ping`），再复制 `n2n` 与测试用 `supernode`（在 `build/n2n-linux-<arch>-<libc>/` 中执行 `make supernode` 产出）。
+运行镜像按 libc 分开：musl 用 `Dockerfile.runtime`（Alpine + iproute2/iputils），glibc 用 `Dockerfile.runtime.glibc`（Debian 11 + iproute2/iputils-ping）；两者都从 `bin/` 复制 `n2n` 与测试用 `supernode`。工具链镜像只负责编译。
 
-`scripts/docker-compose.linux.yml` 示意：
+完整定义见 `scripts/docker-compose.linux.yml`。两个 edge 各占一个容器（独立 netns），supernode 使用原生 3.1.1：
 
 ```yaml
 services:
-  supernode:
-    image: n2n-go-linux:arm64-musl
-    command: ["/usr/local/bin/supernode", "-f", "-p", "7777"]
-
   edge1:
     image: n2n-go-linux:arm64-musl
     cap_add: ["NET_ADMIN"]
-    devices: ["/dev/net/tun"]
-    stop_grace_period: 15s
+    device_cgroup_rules: ["c 10:200 rwm"]
     command:
-      - /usr/local/bin/n2n
-      - edge
+      - /bin/sh
       - -c
-      - smoke
-      - -k
-      - smoke
-      - -a
-      - 10.0.0.1/24
-      - -l
-      - supernode:7777
-      - -d
-      - tap0
-
-  edge2:
-    image: n2n-go-linux:arm64-musl
-    cap_add: ["NET_ADMIN"]
-    devices: ["/dev/net/tun"]
-    stop_grace_period: 15s
-    command:
-      - /usr/local/bin/n2n
-      - edge
-      - -c
-      - smoke
-      - -k
-      - smoke
-      - -a
-      - 10.0.0.2/24
-      - -l
-      - supernode:7777
-      - -d
-      - tap0
+      - >
+        mkdir -p /dev/net;
+        [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200;
+        exec /usr/local/bin/n2n edge -c smoke -k smoke -a 10.0.0.1/24
+        -l supernode:7777 -d tap0
 ```
 
-验证步骤：
+宿主机通常没有 `/dev/net/tun` 节点，因此容器内先 `mknod`，再用 `device_cgroup_rules` 放行 `10:200`；若运行环境支持 `--device /dev/net/tun`，也可以改成 devices 挂载。
+
+验证：
 
 ```bash
-docker compose -f scripts/docker-compose.linux.yml up -d
-# 等两侧日志出现 [OK] edge <<< ... >>> supernode
-docker compose -f scripts/docker-compose.linux.yml exec edge1 ping -c 3 10.0.0.2
-docker compose -f scripts/docker-compose.linux.yml exec edge1 ip -s link show tap0
-docker compose -f scripts/docker-compose.linux.yml exec edge1 ip neigh
+make linux-smoke          # musl
+make linux-smoke-glibc    # glibc
+
+# 等价手动步骤
+docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml up -d
+docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml exec -T edge1 ping -c 3 10.0.0.2
+docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml exec -T edge1 ip -s link show tap0
+docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml exec -T edge1 ip neigh
 ```
 
 断言：
@@ -516,7 +502,7 @@ docker compose -f scripts/docker-compose.linux.yml exec edge1 ip neigh
 退出与清理：
 
 ```bash
-docker compose -f scripts/docker-compose.linux.yml stop
+docker compose -p n2n-linux-smoke -f scripts/docker-compose.linux.yml down --remove-orphans
 # edge 容器的退出码应为 0（可用 docker compose up --abort-on-container-exit 捕获）
 # TAP 位于容器 netns，容器销毁时随 netns 一起消失；
 # 若需显式验证接口删除，使用 6.3 的 netns 方案，在 edge 收到 SIGTERM 后执行
@@ -525,7 +511,7 @@ docker compose -f scripts/docker-compose.linux.yml stop
 
 注意：
 
-- 每个 edge 容器必须加 `NET_ADMIN` 与 `/dev/net/tun`，否则 `TUNSETIFF` 直接失败。
+- 每个 edge 容器必须加 `NET_ADMIN` 并允许 `10:200` 字符设备；compose 通过 `device_cgroup_rules` + `mknod` 兼容没有 `/dev/net/tun` 节点的 Docker Desktop/OrbStack。
 - 两个 edge 在不同容器/不同 netns 中，管理端口可以用默认值，不会冲突。
 - 若用 `--privileged` 跑测试，可省去单独的 cap/device 配置，但生产不建议。
 

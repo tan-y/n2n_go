@@ -73,6 +73,9 @@ void n2n_go_edge_destroy(n2n_go_edge_t *e);
 /* n2n PACKAGE_VERSION as configured at build time. */
 const char *n2n_go_version(void);
 
+/* Device name actually opened (e.g. kernel-assigned tapN); NULL if not open. */
+const char *n2n_go_edge_device_name(n2n_go_edge_t *e);
+
 #ifdef __cplusplus
 }
 #endif

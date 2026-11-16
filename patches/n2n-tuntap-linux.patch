@@ -1,0 +1,156 @@
+--- a/src/tuntap_linux.c
++++ b/src/tuntap_linux.c
+@@ -35,6 +35,7 @@
+ #include <sys/ioctl.h>                // for ioctl, SIOCGIFADDR, SIOCGIFFLAGS
+ #include <sys/param.h>                // for MIN
+ #include <sys/socket.h>               // for socket, msghdr, AF_INET, sockaddr
++#include <sys/time.h>                 // for timeval, SO_RCVTIMEO
+ #include <unistd.h>                   // for close, getpid, read, write, ssi...
+ #include "n2n.h"                      // for tuntap_dev, traceEvent, TRACE_E...
+ 
+@@ -152,15 +153,22 @@
+     if(rc < 0) {
+         traceEvent(TRACE_ERROR, "tuntap ioctl(TUNSETIFF, IFF_TAP) error: %s[%d]\n", strerror(errno), rc);
+         close(device->fd);
++        device->fd = -1;
+         return -1;
+     }
+ 
+     // store the device name for later reuse
+     strncpy(device->dev_name, ifr.ifr_name, MIN(IFNAMSIZ, sizeof(devstr_t)));
++    device->dev_name[MIN(IFNAMSIZ, sizeof(devstr_t)) - 1] = '\0';
+ 
+     if(device_mac && device_mac[0]) {
+         // use the user-provided MAC
+-        str2mac(device->mac_addr, device_mac);
++        if(str2mac(device->mac_addr, device_mac) < 0) {
++            traceEvent(TRACE_WARNING, "invalid MAC address %s, using a random one", device_mac);
++            memrnd(device->mac_addr, N2N_MAC_SIZE);
++            device->mac_addr[0] &= ~0x01;
++            device->mac_addr[0] |= 0x02;
++        }
+     } else {
+         // set an explicit random MAC to know the exact MAC in use, manually
+         // reading the MAC address is not safe as it may change internally
+@@ -178,6 +186,8 @@
+     // initialize netlink socket
+     if((nl_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)) == -1) {
+         traceEvent(TRACE_ERROR, "netlink socket creation failed [%d]: %s", errno, strerror(errno));
++        close(device->fd);
++        device->fd = -1;
+         return -1;
+     }
+ 
+@@ -197,12 +207,17 @@
+     // subscribe to interface events
+     if(bind(nl_fd, (struct sockaddr*)&sa, sizeof(sa)) == -1) {
+         traceEvent(TRACE_ERROR, "netlink socket bind failed [%d]: %s", errno, strerror(errno));
++        close(nl_fd);
++        close(device->fd);
++        device->fd = -1;
+         return -1;
+     }
+ 
+     if((ioctl_fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0) {
+         traceEvent(TRACE_ERROR, "socket creation failed [%d]: %s", errno, strerror(errno));
+         close(nl_fd);
++        close(device->fd);
++        device->fd = -1;
+         return -1;
+     }
+ 
+@@ -210,18 +225,57 @@
+         close(nl_fd);
+         close(ioctl_fd);
+         close(device->fd);
++        device->fd = -1;
+         return -1;
+     }
+ 
+     close(ioctl_fd);
+ 
++    // do not block forever if the up notification is missed
++    {
++        struct timeval tv;
++        tv.tv_sec = 2;
++        tv.tv_usec = 0;
++        setsockopt(nl_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    }
++
+     // wait for the up and running notification
+     traceEvent(TRACE_INFO, "Waiting for TAP interface to be up and running...");
+ 
+     while(!up_and_running) {
+         ssize_t len = recvmsg(nl_fd, &msg, 0);
+         struct nlmsghdr *nh;
++
++        if(len < 0) {
++            if((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
++                struct ifreq check_ifr;
++                int check_fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
++
++                if(check_fd >= 0) {
++                    memset(&check_ifr, 0, sizeof(check_ifr));
++                    strncpy(check_ifr.ifr_name, device->dev_name, IFNAMSIZ);
++                    check_ifr.ifr_name[IFNAMSIZ-1] = '\0';
++
++                    if((ioctl(check_fd, SIOCGIFFLAGS, &check_ifr) == 0)
++                       && (check_ifr.ifr_flags & IFF_UP)
++                       && (check_ifr.ifr_flags & IFF_RUNNING)) {
++                        up_and_running = 1;
++                    }
+ 
++                    close(check_fd);
++                }
++
++                if(up_and_running)
++                    traceEvent(TRACE_INFO, "Interface is up and running");
++                else
++                    traceEvent(TRACE_WARNING, "timed out waiting for TAP interface %s to come up", device->dev_name);
++                break;
++            }
++
++            traceEvent(TRACE_WARNING, "netlink recvmsg failed [%d]: %s", errno, strerror(errno));
++            break;
++        }
++
+         for(nh = (struct nlmsghdr *)nl_buf; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+             if(nh->nlmsg_type == NLMSG_ERROR) {
+                 traceEvent(TRACE_DEBUG, "nh->nlmsg_type == NLMSG_ERROR");
+@@ -231,10 +285,12 @@
+             if(nh->nlmsg_type == NLMSG_DONE)
+                 break;
+ 
+-            if(nh->nlmsg_type == NETLINK_GENERIC) {
++            if(nh->nlmsg_type == RTM_NEWLINK) {
+                 struct ifinfomsg *ifi = NLMSG_DATA(nh);
+ 
+-                // NOTE: skipping interface name check, assuming it's our TAP
++                if(ifi->ifi_index != (int)if_nametoindex(device->dev_name))
++                    continue;
++
+                 if((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) {
+                     up_and_running = 1;
+                     traceEvent(TRACE_INFO, "Interface is up and running");
+@@ -248,7 +304,8 @@
+ 
+     device->ip_addr = inet_addr(device_ip);
+     device->device_mask = inet_addr(device_mask);
+-    device->if_idx = if_nametoindex(dev);
++    device->if_idx = if_nametoindex(device->dev_name);
++    device->mtu = (uint16_t)mtu;
+ 
+     return device->fd;
+ }
+@@ -268,7 +325,10 @@
+ 
+ void tuntap_close (struct tuntap_dev *tuntap) {
+ 
+-    close(tuntap->fd);
++    if(tuntap->fd >= 0) {
++        close(tuntap->fd);
++        tuntap->fd = -1;
++    }
+ }
+ 
+ 

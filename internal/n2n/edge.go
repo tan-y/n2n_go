@@ -176,6 +176,19 @@ func (e *Edge) Run() error {
 	return nil
 }
 
+// DeviceName returns the device name actually opened by the kernel (for Linux
+// this may be an auto-assigned tapN), or "" if the edge is not open.
+func (e *Edge) DeviceName() string {
+	if e == nil || e.handle == nil {
+		return ""
+	}
+	name := C.n2n_go_edge_device_name(e.handle)
+	if name == nil {
+		return ""
+	}
+	return C.GoString(name)
+}
+
 // Stop asks the edge loop to exit. Safe to call before Run.
 func (e *Edge) Stop() {
 	if e == nil || e.handle == nil {

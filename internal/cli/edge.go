@@ -118,8 +118,8 @@ func runEdge(args []string) int {
 	fs.StringVar(&cfg.Cipher, "cipher", cfg.Cipher, "加密算法：none | aes | cc20 | speck | tf（默认 none）")
 	fs.StringVar(&cfg.Compression, "z", cfg.Compression, "压缩算法：none | lzo（默认 none）")
 	fs.StringVar(&cfg.Compression, "compress", cfg.Compression, "压缩算法：none | lzo（默认 none）")
-	fs.StringVar(&cfg.Device, "d", cfg.Device, "utun 设备名：utun 或 utunN（默认 utun，自动分配）")
-	fs.StringVar(&cfg.Device, "device", cfg.Device, "utun 设备名：utun 或 utunN（默认 utun，自动分配）")
+	fs.StringVar(&cfg.Device, "d", cfg.Device, "设备名（macOS: utun/utunN；Linux: 留空自动分配 tapN）")
+	fs.StringVar(&cfg.Device, "device", cfg.Device, "设备名（macOS: utun/utunN；Linux: 留空自动分配 tapN）")
 	fs.StringVar(&cfg.MAC, "m", cfg.MAC, "设备 MAC（默认随机生成本地管理地址）")
 	fs.StringVar(&cfg.MAC, "mac", cfg.MAC, "设备 MAC（默认随机生成本地管理地址）")
 	fs.IntVar(&cfg.MTU, "M", cfg.MTU, "MTU（68-1500，默认 1290）")
@@ -165,7 +165,7 @@ func runEdge(args []string) int {
 	}
 
 	if os.Geteuid() != 0 {
-		logger.Print("creating a utun device requires root privileges; run this command with sudo")
+		logger.Print("creating a TUN/TAP device requires root or CAP_NET_ADMIN; run this command with sudo")
 		return 1
 	}
 
@@ -180,8 +180,12 @@ func runEdge(args []string) int {
 	if cfg.AutoAddress {
 		addr = "auto（等待 supernode 分配）"
 	}
+	deviceName := edge.DeviceName()
+	if deviceName == "" {
+		deviceName = cfg.Device
+	}
 	logger.Printf("starting edge: community=%s supernodes=%s ip=%s device=%s cipher=%s ipv6=%t",
-		cfg.Community, strings.Join(cfg.Supernodes, ","), addr, cfg.Device, cfg.Cipher, cfg.IPv6)
+		cfg.Community, strings.Join(cfg.Supernodes, ","), addr, deviceName, cfg.Cipher, cfg.IPv6)
 	if cfg.IPv6 {
 		logger.Printf("IPv6 enabled: multicast is accepted regardless of -E (neighbour discovery)")
 	}

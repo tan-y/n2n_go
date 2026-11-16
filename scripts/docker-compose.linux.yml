@@ -1,0 +1,34 @@
+name: n2n-linux-smoke
+
+services:
+  supernode:
+    image: ${N2N_IMAGE:-n2n-go-linux:arm64-musl}
+    command: ["/usr/local/bin/supernode", "-f", "-p", "7777"]
+
+  edge1:
+    image: ${N2N_IMAGE:-n2n-go-linux:arm64-musl}
+    cap_add: ["NET_ADMIN"]
+    device_cgroup_rules: ["c 10:200 rwm"]
+    stop_grace_period: 15s
+    command:
+      - /bin/sh
+      - -c
+      - >
+        mkdir -p /dev/net;
+        [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200;
+        exec /usr/local/bin/n2n edge -c smoke -k smoke -a 10.0.0.1/24
+        -l supernode:7777 -d tap0
+
+  edge2:
+    image: ${N2N_IMAGE:-n2n-go-linux:arm64-musl}
+    cap_add: ["NET_ADMIN"]
+    device_cgroup_rules: ["c 10:200 rwm"]
+    stop_grace_period: 15s
+    command:
+      - /bin/sh
+      - -c
+      - >
+        mkdir -p /dev/net;
+        [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200;
+        exec /usr/local/bin/n2n edge -c smoke -k smoke -a 10.0.0.2/24
+        -l supernode:7777 -d tap0
