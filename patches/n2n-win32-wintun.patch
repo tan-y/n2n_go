@@ -1,0 +1,17 @@
+Stop re-opening the TAP device when n2n_go_edge_stop() unblocked the read.
+
+The Windows shim returns 0 from tuntap_read() when the stop event is set;
+without this check edge_read_from_tap() would sleep, close and re-open the
+adapter, which fights with process teardown.
+
+--- a/src/edge_utils.c
++++ b/src/edge_utils.c
+@@ -2175,7 +2175,9 @@
+     ssize_t                         len;
+ 
+     len = tuntap_read( &(eee->device), eth_pkt, N2N_PKT_BUF_SIZE );
++    if(!*eee->keep_running)
++        return;
+     if((len <= 0) || (len > N2N_PKT_BUF_SIZE)) {
+         traceEvent(TRACE_WARNING, "read()=%d [%d/%s]",
+                    (signed int)len, errno, strerror(errno));

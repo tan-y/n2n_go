@@ -14,10 +14,9 @@ import (
 // Community occupies a 20-byte array (N2N_COMMUNITY_SIZE), so at most 19 bytes
 // are usable; the description array (N2N_DESC_SIZE) leaves 15 usable bytes.
 const (
-	CommunityMax  = 19 // N2N_COMMUNITY_SIZE - 1
-	DescMax       = 15 // N2N_DESC_SIZE - 1
-	DeviceNameMax = 16 // N2N_IFNAMSIZ (devstr_t)
-	MACMax        = 18 // N2N_MACNAMSIZ
+	CommunityMax = 19 // N2N_COMMUNITY_SIZE - 1
+	DescMax      = 15 // N2N_DESC_SIZE - 1
+	MACMax       = 18 // N2N_MACNAMSIZ
 
 	DefaultMTU      = 1290 // DEFAULT_MTU
 	MinMTU          = 68
@@ -197,12 +196,15 @@ func (c *EdgeConfig) Validate() error {
 			}
 		}
 	}
+	if c.AutoAddress && !supportsAutoAddress() {
+		return fmt.Errorf("address mode auto is not supported on this platform; use a static IPv4/CIDR (-a)")
+	}
 
 	if c.Device == "" {
 		c.Device = defaultDeviceName()
 	}
-	if len(c.Device) >= DeviceNameMax {
-		return fmt.Errorf("device name %q is too long: max %d bytes", c.Device, DeviceNameMax-1)
+	if max := deviceNameMax(); len(c.Device) >= max {
+		return fmt.Errorf("device name %q is too long: max %d bytes", c.Device, max-1)
 	}
 	if err := validateDeviceName(c.Device); err != nil {
 		return err
@@ -219,19 +221,24 @@ func (c *EdgeConfig) Validate() error {
 		// n2n seeds its PRNG from time()+clock(), which is nearly identical for
 		// processes started in the same second on macOS. Two edges launched
 		// together would then generate the same MAC and the supernode would
-		// treat them as one node, so the MAC is drawn here instead.
-		mac, err := randomMAC()
+		// treat them as one node, so the MAC is drawn here instead. Windows
+		// leaves it empty: the wintun shim derives it deterministically.
+		mac, err := platformDefaultMAC()
 		if err != nil {
-			return fmt.Errorf("failed to generate a random MAC: %w", err)
+			return fmt.Errorf("failed to generate a default MAC: %w", err)
 		}
-		c.MAC = mac.String()
-	} else {
+		c.MAC = mac
+	}
+	if c.MAC != "" {
 		mac, err := net.ParseMAC(c.MAC)
 		if err != nil {
 			return fmt.Errorf("invalid MAC %q: %w", c.MAC, err)
 		}
 		if len(mac) != 6 {
 			return fmt.Errorf("invalid MAC %q: must have 6 bytes", c.MAC)
+		}
+		if err := validateMAC(mac); err != nil {
+			return err
 		}
 	}
 

@@ -1,0 +1,2 @@
+// Embeds n2n.manifest as the application manifest (resource type RT_MANIFEST).
+1 24 "n2n.manifest"

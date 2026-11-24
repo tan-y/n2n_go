@@ -112,6 +112,7 @@ n2n_go/
 ├── third_party/
 │   ├── lib/windows/amd64/libn2n.a
 │   ├── n2n-src/include/              # 与 macOS/Linux 共用
+│   ├── n2n-src/src/win32/            # n2n_typedefs.h 相对引用的 MinGW 头
 │   └── wintun/amd64/wintun.dll       # 官方签名 DLL（构建时拷到 bin/）
 └── bin/
     ├── n2n-windows-amd64.exe
@@ -170,8 +171,9 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 rsync -a --exclude build --exclude bin --exclude .git "$N2N_SRC/" "$WORK/"
 
-# 用 wintun 设备层替换 tap-windows6 实现
+# 用 wintun 设备层替换 tap-windows6 实现（头文件同目录，供 wintap.c include）
 cp "$ROOT/platform/windows/tuntap_wintun.c" "$WORK/src/win32/wintap.c"
+cp "$ROOT/platform/windows/tuntap_wintun.h" "$WORK/src/win32/tuntap_wintun.h"
 
 ( cd "$WORK" \
   && patch -p1 --quiet -i "$ROOT/patches/n2n-keep-running.patch" \
@@ -192,6 +194,10 @@ cp libn2n.a "$LIB_DIR/libn2n.a"
 # 覆盖共享目录，否则会无谓触发 macOS/Linux 全量重编译。
 rsync -a --exclude config.h include/ "$INCLUDE_DIR/"
 [ -f "$INCLUDE_DIR/config.h" ] || cp include/config.h "$INCLUDE_DIR/config.h"
+# n2n_typedefs.h 在 MinGW 下会 include "../src/win32/n2n_win32.h"，cgo 编译
+# edge_glue.c 时需要该头文件位于共享头目录旁边。
+rsync -a --include '*/' --include '*.h' --exclude '*' \
+  src/win32/ "$(dirname "$INCLUDE_DIR")/src/win32/"
 ```
 
 要点：
@@ -214,13 +220,13 @@ rsync -a --exclude config.h include/ "$INCLUDE_DIR/"
 package n2n
 
 /*
-#cgo CFLAGS: -D_WIN32_WINNT=0x0601
-#cgo LDFLAGS: ${SRCDIR}/../../third_party/lib/windows/amd64/libn2n.a -lws2_32 -liphlpapi
+#cgo CFLAGS: -D_WIN32_WINNT=0x0601 -I${SRCDIR}/../../platform/windows
+#cgo LDFLAGS: ${SRCDIR}/../../third_party/lib/windows/amd64/libn2n.a -lnetapi32 -lws2_32 -liphlpapi
 */
 import "C"
 ```
 
-`internal/n2n/edge.go` 的 CFLAGS 保持 `-I${SRCDIR}/../../third_party/n2n-src/include -I${SRCDIR} -DSKIP_MULTICAST_PEERS_DISCOVERY` 不变即可；Windows 头文件由 mingw 提供，不需要额外路径。
+`internal/n2n/edge.go` 的 CFLAGS 保持 `-I${SRCDIR}/../../third_party/n2n-src/include -I${SRCDIR} -DSKIP_MULTICAST_PEERS_DISCOVERY` 不变即可；额外的 `-I.../platform/windows` 用于 `tuntap_wintun.h`（`tuntap_interrupt` 声明），系统头文件由 mingw 提供。
 
 构建命令（在 MSYS2 MinGW x64 shell 中）：
 
@@ -349,7 +355,7 @@ peer → n2n edge → tuntap_write
 **虚拟 MAC**：
 
 - `-m` 显式指定时直接使用（要求单播、非全零）；
-- 未指定时按适配器名 + 社区名 + `-a` 地址做确定性派生，首字节固定 `0x02`（本地管理、单播）；
+- 未指定时按适配器名 + 社区名 + `-a` 地址 + 本机名做确定性派生，首字节固定 `0x02`（本地管理、单播）；
 - 写入 `tuntap_dev.mac_addr`，并作为 shim 发出的所有以太帧的源 MAC；
 - 同一节点重启后 MAC 不变，避免对端 n2n 的 MAC 表长期指向旧值。
 
@@ -396,7 +402,7 @@ n2n 默认 `drop_multicast = 1`（[edge_utils.c](file:///Users/xtao/Work/n2n/n2n
 | `tuntap_open(device, dev, mode, ip, mask, mac, mtu, metric)` | 解析 IP/掩码；创建/打开 wintun 适配器与会话；配置地址/MTU；初始化虚拟 MAC、学习表、ARP 队列、stop 事件；`metric` 首期忽略 |
 | `tuntap_read(device, buf, len)` | 先取 ARP 队列；否则 `WaitForMultipleObjects({read_event, stop_event})`；收到 IP 包后封装以太头返回；stop 时返回 0 |
 | `tuntap_write(device, buf, len)` | ARP 应答入队；IPv4 去头后写入 wintun；更新学习表 |
-| `tuntap_close(device)` | `WintunEndSession` → `WintunCloseAdapter` → 关闭 stop 事件 → 释放队列/名字 → `FreeLibrary` |
+| `tuntap_close(device)` | `WintunEndSession` → `WintunCloseAdapter` → 释放队列/名字 → `FreeLibrary`；stop 事件只 `ResetEvent`，保留到进程退出 |
 | `tuntap_get_address(device)` | 空实现（与上游一致） |
 | `tuntap_interrupt(device)` | `SetEvent(stop_event)`，供 `n2n_go_edge_stop` 调用 |
 | `initWin32()` / `destroyWin32()` | `WSAStartup(2.2)` / `WSACleanup()`；胶水层不调用后者 |
@@ -405,6 +411,7 @@ n2n 默认 `drop_multicast = 1`（[edge_utils.c](file:///Users/xtao/Work/n2n/n2n
 实现约束：
 
 - 首期按「单进程单 edge」实现，wintun 会话、stop 事件、学习表放在文件级静态上下文；胶水层停止时调用 `tuntap_interrupt`。若后续同进程多 edge，需要把上下文挂到 `tuntap_dev` 并改为实例级。
+- stop 事件不在 `tuntap_close` 中关闭：`n2n_go_edge_stop` 可能由信号 goroutine 与 run 线程的 teardown 并发调用，关闭句柄后再 `SetEvent` 会触发未定义行为。首期保留句柄到进程退出，每次 `tuntap_open` 前 `ResetEvent`。
 - 设备名只接受 ASCII `[A-Za-z0-9_.-]`，长度 1–127；空名映射为 `n2n0`。这样 `MultiByteToWideChar(CP_UTF8)` 与日志都不需要处理复杂编码。
 - `device_name` / `ifName` 用 `strdup` 分配，`tuntap_close` 负责释放；`device_handle` 置 `INVALID_HANDLE_VALUE`，保证 close 幂等。
 - 所有诊断信息走 `traceEvent(TRACE_ERROR/TRACE_NORMAL, ...)`，不要用 `printf` 污染 stdout。
@@ -514,7 +521,7 @@ if(len <= 0) {
 
 Go 侧要做的平台化：
 
-- `internal/config/device_windows.go`：空名合法并默认 `n2n0`；非空校验为 1–127 个 `[A-Za-z0-9_.-]`；`DeviceNameMax` 从常量（[config.go](../internal/config/config.go#L19)）改为平台值（ASCII 127）；
+- `internal/config/device_windows.go`：空名合法并默认 `n2n0`；非空校验为 1–127 个 `[A-Za-z0-9_.-]`；`DeviceNameMax` 改为平台函数 `deviceNameMax()`（Windows 返回 128，即可用 127 字节）；
 - [config.go](../internal/config/config.go#L184-L191) 的 `if c.Device == "" { c.Device = "utun" }` 与 `isUTUNName` 改为调用平台函数 `defaultDeviceName()` / `validateDeviceName()`；
 - [config.go](../internal/config/config.go#L200-L215) 的 `randomMAC()` 在 Windows 上不生成：`-m` 为空时把空串交给 C，由 shim 确定性派生；显式 `-m` 时校验单播与非全零；
 - [CLI edge.go](../internal/cli/edge.go#L87-L88) 的 `-d` 默认值改为取平台默认，帮助文本（[edge.go](../internal/cli/edge.go#L203)）改为“Windows: wintun 适配器名，空表示 n2n0”；
@@ -594,7 +601,7 @@ strncpy(e->eee->tuntap_priv_conf.tuntap_dev_name, e->dev.dev_name, ...);
 ### 6.4 清理
 
 - `run_edge_loop` 返回后执行 `edge_term_conf → tuntap_close → edge_term`。
-- `tuntap_close` 顺序：`WintunEndSession` → `WintunCloseAdapter` → 关闭 stop 事件 → 释放 ARP 队列与 `device_name`/`ifName` → `FreeLibrary`；`device_handle` 置 `INVALID_HANDLE_VALUE`，保证 `destroy` 幂等。
+- `tuntap_close` 顺序：`WintunEndSession` → `WintunCloseAdapter` → 释放 ARP 队列与 `device_name`/`ifName` → `FreeLibrary`；stop 事件只 `ResetEvent`（见 5.4）；`device_handle` 置 `INVALID_HANDLE_VALUE`，保证 `destroy` 幂等。
 - 关闭的对象应是 `e->eee->device`（读错误重开后的当前句柄），不是创建时的 `e->dev` 浅拷贝。wintun 首期正常情况下不会走重开路径，但仍按同一约定处理。
 - `e->eee->device` 与 `e->dev` 是浅拷贝关系：`tuntap_close` 释放名字后，另一份中的同名指针悬空。`edge_term` 不使用这些字段，后续维护时应避免在 close 之后访问。
 

@@ -118,10 +118,10 @@ func runEdge(args []string) int {
 	fs.StringVar(&cfg.Cipher, "cipher", cfg.Cipher, "加密算法：none | aes | cc20 | speck | tf（默认 none）")
 	fs.StringVar(&cfg.Compression, "z", cfg.Compression, "压缩算法：none | lzo（默认 none）")
 	fs.StringVar(&cfg.Compression, "compress", cfg.Compression, "压缩算法：none | lzo（默认 none）")
-	fs.StringVar(&cfg.Device, "d", cfg.Device, "设备名（macOS: utun/utunN；Linux: 留空自动分配 tapN）")
-	fs.StringVar(&cfg.Device, "device", cfg.Device, "设备名（macOS: utun/utunN；Linux: 留空自动分配 tapN）")
-	fs.StringVar(&cfg.MAC, "m", cfg.MAC, "设备 MAC（默认随机生成本地管理地址）")
-	fs.StringVar(&cfg.MAC, "mac", cfg.MAC, "设备 MAC（默认随机生成本地管理地址）")
+	fs.StringVar(&cfg.Device, "d", cfg.Device, "设备名（macOS: utun/utunN；Linux: 留空自动分配 tapN；Windows: wintun 适配器名，留空为 n2n0）")
+	fs.StringVar(&cfg.Device, "device", cfg.Device, "设备名（macOS: utun/utunN；Linux: 留空自动分配 tapN；Windows: wintun 适配器名，留空为 n2n0）")
+	fs.StringVar(&cfg.MAC, "m", cfg.MAC, "设备 MAC（默认自动生成或派生）")
+	fs.StringVar(&cfg.MAC, "mac", cfg.MAC, "设备 MAC（默认自动生成或派生）")
 	fs.IntVar(&cfg.MTU, "M", cfg.MTU, "MTU（68-1500，默认 1290）")
 	fs.IntVar(&cfg.MTU, "mtu", cfg.MTU, "MTU（68-1500，默认 1290）")
 	fs.IntVar(&cfg.LocalPort, "p", cfg.LocalPort, "本地 UDP 端口（0 表示自动）")
@@ -164,8 +164,8 @@ func runEdge(args []string) int {
 		return 2
 	}
 
-	if os.Geteuid() != 0 {
-		logger.Print("creating a TUN/TAP device requires root or CAP_NET_ADMIN; run this command with sudo")
+	if err := checkPrivileges(); err != nil {
+		logger.Print(err)
 		return 1
 	}
 
@@ -232,21 +232,21 @@ func runEdge(args []string) int {
 					logger.Printf("edge stopped with error: %v", err)
 					return 1
 				}
-				logger.Print("edge stopped, utun device released")
+				logger.Print("edge stopped, device released")
 				return 0
 			}
 			if err := <-runErr; err != nil {
 				logger.Printf("edge stopped with error: %v", err)
 				return 1
 			}
-			logger.Print("edge stopped, utun device released")
+			logger.Print("edge stopped, device released")
 			return 0
 		}
 	}
 }
 
 // waitForAssignedAddress polls the C layer until the supernode-assigned
-// address has been applied to the utun device. The register interval governs
+// address has been applied to the device. The register interval governs
 // how fast the first REGISTER_SUPER_ACK arrives; a failure here is reported to
 // the caller so the process can exit with a non-zero status instead of looking
 // connected while no address is configured.
@@ -286,8 +286,8 @@ Optional:
                             user-password 认证密码
   -A, --cipher string       加密算法 none|aes|cc20|speck|tf（默认 none）
   -z, --compress string     压缩算法 none|lzo（默认 none）
-  -d, --device string       utun 或 utunN（默认 utun）
-  -m, --mac string          设备 MAC
+  -d, --device string       macOS: utun/utunN；Linux: 空自动 tapN；Windows: wintun 适配器名
+  -m, --mac string          设备 MAC（Windows 留空由 wintun shim 派生）
   -M, --mtu int             MTU 68-1500（默认 1290）
   -p, --local-port int      本地端口（0 自动）
   -t, --mgmt-port int       管理端口（默认 5644）
@@ -307,4 +307,7 @@ scripts/multicast-test.sh 验证（当前广播 MAC 实现下不受 -E 约束，
 --ipv6 只承载 IPv6 报文，接口使用 macOS 自动生成的链路本地地址（T3，见 docs/macOS-p5.md）。
 -a auto 由 supernode 分配地址；多个 edge 同时启动时请给每个节点不同的 -I 描述，否则
 可能拿到相同地址。需要 root 权限。
+
+Windows 需要管理员权限，wintun.dll（0.14+）必须与 exe 同目录；首期仅承载 IPv4，
+暂不支持 -a auto。
 `

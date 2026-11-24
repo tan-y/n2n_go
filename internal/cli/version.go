@@ -14,6 +14,9 @@ func runVersion(args []string) int {
 	_ = args
 	fmt.Printf("n2n-go %s\n", Version)
 	fmt.Printf("n2n    %s\n", n2n.Version())
+	if v := n2n.WintunVersion(); v != "" {
+		fmt.Printf("wintun %s\n", v)
+	}
 	fmt.Printf("go     %s\n", runtime.Version())
 	return 0
 }

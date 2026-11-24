@@ -2,7 +2,7 @@ GO        ?= go
 N2N_SRC   ?= $(CURDIR)/third_party/n2n
 NIX_SHELL ?= /nix/var/nix/profiles/default/bin/nix-shell
 
-.PHONY: all n2n-lib n2n-lib-amd64 build build-amd64 build-all test vet check smoke multicast auto-address ipv6 interop linux-arm64 linux-arm64-glibc linux-amd64 linux-amd64-glibc linux-smoke linux-smoke-glibc linux-clean clean shell
+.PHONY: all n2n-lib n2n-lib-amd64 build build-amd64 build-all test vet check smoke multicast auto-address ipv6 interop linux-arm64 linux-arm64-glibc linux-amd64 linux-amd64-glibc linux-smoke linux-smoke-glibc linux-clean n2n-lib-win win win-smoke win-clean clean shell
 
 all: build
 
@@ -69,6 +69,19 @@ linux-smoke-glibc:
 
 linux-clean:
 	rm -rf build/n2n-linux-* third_party/lib/linux bin/n2n-linux-* bin/supernode-linux-*
+
+# Windows targets must run inside an MSYS2 MinGW-w64 shell (see docs/Windows.md).
+n2n-lib-win:
+	N2N_SRC=$(N2N_SRC) bash ./scripts/build-n2n-win.sh
+
+win: n2n-lib-win
+	SKIP_N2N_LIB=1 bash ./scripts/build-windows.sh
+
+win-smoke:
+	powershell -ExecutionPolicy Bypass -File scripts/smoke-test-windows.ps1
+
+win-clean:
+	rm -rf build/n2n-windows-* third_party/lib/windows bin/n2n-windows-*.exe bin/wintun.dll
 
 clean:
 	rm -rf build bin third_party/lib third_party/n2n-src

@@ -8,11 +8,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <io.h>
+#define dup _dup
+#define fdopen _fdopen
+#define close _close
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+#else
 #include <unistd.h>
+#endif
 
 #include "n2n.h"
 #include "auth.h"
 #include "edge_glue.h"
+
+#ifdef _WIN32
+#include "tuntap_wintun.h"
+#endif
 
 /* Provided by cgo (//export n2nGoOnStarted). */
 extern void n2nGoOnStarted(uintptr_t handle);
@@ -79,7 +94,13 @@ static void cleanup(n2n_go_edge_t *e) {
 
     if(e->eee != NULL) {
         edge_term_conf(&e->conf);
+#ifdef _WIN32
+        /* n2n re-opens the device into eee->device after a read error, so close
+         * the live copy rather than the shallow copy taken at create time. */
+        tuntap_close(&e->eee->device);
+#else
         tuntap_close(&e->dev);
+#endif
         edge_term(e->eee);
         e->eee = NULL;
         e->conf_ready = 0;
@@ -91,8 +112,13 @@ static void cleanup(n2n_go_edge_t *e) {
         clear_peer_list(&e->conf.supernodes);
         e->conf_ready = 0;
     }
+#ifdef _WIN32
+    if(e->dev.device_handle != INVALID_HANDLE_VALUE)
+        tuntap_close(&e->dev);
+#else
     if(e->dev.fd >= 0)
         tuntap_close(&e->dev);
+#endif
 }
 
 n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int errbuf_len) {
@@ -123,7 +149,12 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
         set_err(errbuf, errbuf_len, "out of memory");
         return NULL;
     }
+#ifdef _WIN32
+    e->dev.device_handle = INVALID_HANDLE_VALUE;
+    initWin32();
+#else
     e->dev.fd = -1;
+#endif
     e->keep_running = 1;
     e->started_handle = cfg->started_handle;
 
@@ -191,6 +222,11 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
     e->conf.mgmt_port = cfg->mgmt_port;
     e->conf.allow_routing = (uint8_t)(cfg->allow_routing ? 1 : 0);
     e->conf.drop_multicast = (uint8_t)(cfg->drop_multicast ? 1 : 0);
+#ifdef _WIN32
+    /* The wintun shim emits broadcast frames for unknown destinations and
+     * answers ARP; n2n would drop both when drop_multicast is enabled. */
+    e->conf.drop_multicast = 0;
+#endif
     e->conf.disable_pmtu_discovery = (uint8_t)(cfg->disable_pmtu_discovery ? 1 : 0);
     e->conf.tos = (uint8_t)cfg->tos;
     if(cfg->register_interval > 0)
@@ -237,11 +273,19 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
 #ifdef __APPLE__
     tuntap_osx_enable_ipv6(cfg->ipv6);
 #endif
+#ifdef _WIN32
+    tuntap_win_set_community(cfg->community);
+#endif
 
     if(tuntap_open(&e->dev, (char *)((cfg->device != NULL) ? cfg->device : ""),
                    cfg->auto_address ? "sn_assign" : "static",
                    (char *)ip, (char *)mask, cfg->mac, cfg->mtu, 0) < 0) {
+#ifdef _WIN32
+        win_print_available_adapters();
+        set_err(errbuf, errbuf_len, "no wintun adapter available (run as Administrator and place wintun.dll next to the executable)");
+#else
         set_err(errbuf, errbuf_len, "failed to open TUN/TAP device (root or CAP_NET_ADMIN required?)");
+#endif
         cleanup(e);
         free(e);
         return NULL;
@@ -254,8 +298,17 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
 
     /* n2n re-opens the device from tuntap_priv_conf after a read error. */
     memset(&e->eee->tuntap_priv_conf, 0, sizeof(e->eee->tuntap_priv_conf));
+#ifdef _WIN32
+    {
+        const char *actual = (e->dev.device_name != NULL) ? e->dev.device_name
+                           : ((e->dev.ifName != NULL) ? e->dev.ifName : "");
+        strncpy(e->eee->tuntap_priv_conf.tuntap_dev_name, actual,
+                sizeof(e->eee->tuntap_priv_conf.tuntap_dev_name) - 1);
+    }
+#else
     strncpy(e->eee->tuntap_priv_conf.tuntap_dev_name, e->dev.dev_name,
             sizeof(e->eee->tuntap_priv_conf.tuntap_dev_name) - 1);
+#endif
     strncpy(e->eee->tuntap_priv_conf.ip_mode, cfg->auto_address ? "sn_assign" : "static",
             sizeof(e->eee->tuntap_priv_conf.ip_mode) - 1);
     strncpy(e->eee->tuntap_priv_conf.ip_addr, ip,
@@ -267,8 +320,11 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
                 sizeof(e->eee->tuntap_priv_conf.device_mac) - 1);
     e->eee->tuntap_priv_conf.mtu = cfg->mtu;
     e->eee->tuntap_priv_conf.metric = 0;
+#ifndef _WIN32
+    /* The Windows variant of n2n_tuntap_priv_config_t has no uid/gid fields. */
     e->eee->tuntap_priv_conf.userid = 0;
     e->eee->tuntap_priv_conf.groupid = 0;
+#endif
 
     return e;
 }
@@ -278,6 +334,12 @@ int n2n_go_edge_run(n2n_go_edge_t *e) {
 
     if((e == NULL) || (e->eee == NULL))
         return -1;
+
+#ifdef _WIN32
+    /* The shim relies on broadcast frames (ARP replies, first packets). */
+    e->eee->conf.drop_multicast = 0;
+    traceEvent(TRACE_NORMAL, "wintun device: multicast/broadcast passthrough forced (drop_multicast=0)");
+#endif
 
     e->eee->keep_running = &e->keep_running;
     if(e->stop_requested)
@@ -297,6 +359,10 @@ void n2n_go_edge_stop(n2n_go_edge_t *e) {
         return;
     e->stop_requested = 1;
     e->keep_running = 0;
+#ifdef _WIN32
+    /* Wake the tun read thread blocked on the wintun read event. */
+    tuntap_interrupt(&e->dev);
+#endif
 }
 
 int n2n_go_edge_configure_auto(n2n_go_edge_t *e) {
@@ -331,8 +397,12 @@ int n2n_go_edge_configure_auto(n2n_go_edge_t *e) {
     e->eee->device.ip_addr = e->dev.ip_addr;
     e->eee->device.device_mask = e->dev.device_mask;
 
+#ifdef __APPLE__
     traceEvent(TRACE_NORMAL, "supernode assigned address %s/%s, applied to %s",
                ip, mask, e->dev.dev_name);
+#else
+    traceEvent(TRACE_NORMAL, "supernode assigned address %s/%s", ip, mask);
+#endif
 
     /* The supernode only learns the address from the next REGISTER_SUPER (it
      * does not record its own assignment), and until then it keeps the peer at
@@ -355,8 +425,22 @@ const char *n2n_go_version(void) {
     return PACKAGE_VERSION;
 }
 
+const char *n2n_go_wintun_version(void) {
+#ifdef _WIN32
+    return tuntap_win_driver_version();
+#else
+    return "";
+#endif
+}
+
 const char *n2n_go_edge_device_name(n2n_go_edge_t *e) {
+#ifdef _WIN32
+    if((e == NULL) || (e->dev.device_name == NULL) || (e->dev.device_name[0] == '\0'))
+        return NULL;
+    return e->dev.device_name;
+#else
     if((e == NULL) || (e->dev.dev_name[0] == '\0'))
         return NULL;
     return e->dev.dev_name;
+#endif
 }

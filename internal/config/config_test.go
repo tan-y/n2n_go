@@ -184,7 +184,14 @@ func TestValidateAutoAddress(t *testing.T) {
 		c.Community = "demo"
 		c.Supernodes = []string{"127.0.0.1:7777"}
 		c.CIDR = value
-		if err := c.Validate(); err != nil {
+		err := c.Validate()
+		if !supportsAutoAddress() {
+			if err == nil || !strings.Contains(err.Error(), "auto") {
+				t.Fatalf("Validate(%q): want an auto-not-supported error, got %v", value, err)
+			}
+			continue
+		}
+		if err != nil {
 			t.Fatalf("Validate(%q): %v", value, err)
 		}
 		if !c.AutoAddress {
@@ -204,7 +211,14 @@ func TestValidateAutoAddress(t *testing.T) {
 func TestValidateAutoAddressClearsStatic(t *testing.T) {
 	c := validConfig(t)
 	c.CIDR = "auto"
-	if err := c.Validate(); err != nil {
+	err := c.Validate()
+	if !supportsAutoAddress() {
+		if err == nil || !strings.Contains(err.Error(), "auto") {
+			t.Fatalf("want an auto-not-supported error, got %v", err)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if !c.AutoAddress || c.IP != "" || c.Mask != "" {

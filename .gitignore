@@ -4,3 +4,4 @@ build/
 bin/*
 *.a
 third_party/n2n-src/
+third_party/wintun/

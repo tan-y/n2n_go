@@ -243,6 +243,12 @@ func Version() string {
 	return C.GoString(C.n2n_go_version())
 }
 
+// WintunVersion returns the running wintun driver version on Windows and ""
+// on other platforms (or when wintun.dll is missing).
+func WintunVersion() string {
+	return C.GoString(C.n2n_go_wintun_version())
+}
+
 //export n2nGoOnStarted
 func n2nGoOnStarted(handle C.uintptr_t) {
 	if v := cgo.Handle(handle).Value(); v != nil {

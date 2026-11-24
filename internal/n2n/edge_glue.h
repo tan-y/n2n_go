@@ -25,8 +25,8 @@ typedef struct n2n_go_config {
     int          auto_address; /* non-zero: SN_ASSIGN, address comes from the supernode */
     int          ipv6;         /* non-zero: carry IPv6 over the tunnel (--ipv6) */
 
-    const char  *device; /* "utun" or "utunN" */
-    const char  *mac;
+    const char  *device; /* macOS: utun/utunN; Linux: tapN or ""; Windows: wintun name */
+    const char  *mac;    /* NULL/empty: derive (Windows) or generate (macOS/Linux) */
 
     int mtu;
     int transop_id;
@@ -48,7 +48,7 @@ typedef struct n2n_go_config {
     uintptr_t started_handle;
 } n2n_go_config_t;
 
-/* Creates the edge, initializes n2n and opens the utun device.
+/* Creates the edge, initializes n2n and opens the TUN/TAP device.
  * Returns NULL on failure and fills errbuf with a human readable message. */
 n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg,
                                  char *errbuf, int errbuf_len);
@@ -75,6 +75,10 @@ const char *n2n_go_version(void);
 
 /* Device name actually opened (e.g. kernel-assigned tapN); NULL if not open. */
 const char *n2n_go_edge_device_name(n2n_go_edge_t *e);
+
+/* Running wintun driver version on Windows; "" on other platforms or when the
+ * DLL is missing. Used by `n2n version`. */
+const char *n2n_go_wintun_version(void);
 
 #ifdef __cplusplus
 }
