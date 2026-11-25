@@ -3,7 +3,7 @@
 用 Go 封装的 [n2n](https://github.com/ntop/n2n) 3.1.1 edge 客户端，通过 cgo 链接
 `libn2n.a`，在保持原生 n2n 行为的前提下提供更严格的参数校验和更清晰的 CLI。
 
-当前支持 macOS、Linux 与 Windows（Windows 本地冒烟通过，跨主机数据面未验证）。
+当前支持 macOS、Linux 与 Windows（Windows 与 Linux edge 已跨主机双向 `ping` 验证）。
 
 ## 状态
 
@@ -13,7 +13,7 @@
 | Linux arm64 musl | 完成并已联调 | `bin/n2n-linux-arm64-musl`（静态） |
 | Linux arm64 glibc | 完成并已联调 | `bin/n2n-linux-arm64-glibc`（Debian 11 构建，实测最高符号 GLIBC_2.17） |
 | Linux amd64 | 构建脚本已就绪，尚未实际验证 | `make linux-amd64` / `make linux-amd64-glibc` |
-| Windows amd64 | 首期实现完成，本地冒烟通过 | `bin/n2n-windows-amd64.exe` + 同目录 `wintun.dll` |
+| Windows amd64 | 首期完成，本地冒烟与跨主机双向 `ping` 通过 | `bin/n2n-windows-amd64.exe` + 同目录 `wintun.dll` |
 
 已知限制：
 

@@ -400,7 +400,7 @@ n2n 默认 `drop_multicast = 1`（[edge_utils.c](file:///Users/xtao/Work/n2n/n2n
 | 函数 | 实现 |
 | --- | --- |
 | `tuntap_open(device, dev, mode, ip, mask, mac, mtu, metric)` | 解析 IP/掩码；创建/打开 wintun 适配器与会话；配置地址/MTU；初始化虚拟 MAC、学习表、ARP 队列、stop 事件；`metric` 首期忽略 |
-| `tuntap_read(device, buf, len)` | 先取 ARP 队列；否则 `WaitForMultipleObjects({read_event, stop_event})`；收到 IP 包后封装以太头返回；stop 时返回 0 |
+| `tuntap_read(device, buf, len)` | 先取 ARP 队列；否则**先** `WintunReceivePacket`，仅在返回 `ERROR_NO_MORE_ITEMS` 时才 `WaitForMultipleObjects({read_event, stop_event})` 并重试；收到 IP 包后封装以太头返回；stop 时返回 0 |
 | `tuntap_write(device, buf, len)` | ARP 应答入队；IPv4 去头后写入 wintun；更新学习表 |
 | `tuntap_close(device)` | `WintunEndSession` → `WintunCloseAdapter` → 释放队列/名字 → `FreeLibrary`；stop 事件只 `ResetEvent`，保留到进程退出 |
 | `tuntap_get_address(device)` | 空实现（与上游一致） |
@@ -467,14 +467,25 @@ void n2n_go_edge_stop(n2n_go_edge_t *e) {
 }
 ```
 
-读侧：
+读侧（顺序很关键，不能先等事件）：
 
 ```c
-HANDLE ev[2] = { WintunGetReadWaitEvent(session), stop_event };
-DWORD w = WaitForMultipleObjects(2, ev, FALSE, INFINITE);
-if(w == WAIT_OBJECT_0 + 1)
-    return 0;                      /* 停止，不再读 */
+for(;;) {
+    packet = WintunReceivePacket(session, &size);
+    if(packet != NULL)
+        break;                          /* 有包，封装以太头后返回 */
+
+    if(GetLastError() != ERROR_NO_MORE_ITEMS)
+        return -1;                      /* ERROR_HANDLE_EOF 等按停止处理 */
+
+    HANDLE ev[2] = { WintunGetReadWaitEvent(session), stop_event };
+    DWORD w = WaitForMultipleObjects(2, ev, FALSE, INFINITE);
+    if(w == WAIT_OBJECT_0 + 1)
+        return 0;                       /* 停止，不再读 */
+}
 ```
+
+读事件是自动复位的（auto-reset），ring 中已积压多个包时事件早已被上一次读取消费。若先等事件再读一次，就会在仍有包可读的情况下永久阻塞，表现为“适配器 `SentBytes` 持续增长，但 edge 始终读不到包”。必须按 wintun.h 的规定：**先轮询 receive，`ERROR_NO_MORE_ITEMS` 才等事件**。
 
 配合 `patches/n2n-win32-wintun.patch` 的唯一关键修改：`edge_read_from_tap` 在 `tuntap_read` 返回 `<= 0` 后先检查 `keep_running`：
 
@@ -533,7 +544,7 @@ Go 侧要做的平台化：
 - 不默认嵌入 `requireAdministrator` 清单：否则 `n2n version` 也会弹 UAC。若后续做安装器/快捷方式，再为 `n2n.exe` 提供带清单的入口（`platform/windows/n2n.manifest` + `windres -O coff -o cmd/n2n/n2n.syso`）。
 - `wintun.dll` 必须与 exe 同目录、同架构；构建脚本负责复制，启动时校验文件存在与版本。官方签名 DLL 允许随应用分发，发布包内保留其原始文件名与许可证说明。
 - 不需要预装驱动、不需要重启；卸载/退出时适配器自动删除。
-- Windows 防火墙仍可能拦截入站 ICMP；文档给出放行命令，但首期不自动修改防火墙。
+- Windows 防火墙会拦截入站 ICMP：wintun 适配器默认归入 Public 配置文件，系统内置 ICMPv4-In 规则在该配置下为 Disabled，对端 ping 本机会 100% 丢包。文档（7.2）给出放行命令，首期不自动修改防火墙。
 
 ## 6. 生命周期与并发
 
@@ -632,9 +643,11 @@ Get-Item .\wintun.dll | Select-Object Name, Length, VersionInfo
 # 2. 以管理员身份运行；确认版本输出包含 wintun 驱动版本
 .\n2n-windows-amd64.exe version
 
-# 3. 放行 ping（按需；测试网络配置文件为 Private 时通常已允许）
-New-NetFirewallRule -DisplayName "n2n ICMPv4" -Protocol ICMPv4 `
-  -IcmpType 8 -Direction Inbound -Action Allow
+# 3. 放行入站 ping（必需，否则对端 ping 本机 100% 丢包）
+#    注意：wintun 适配器默认归入 Public 配置文件，且内置 ICMPv4-In 规则在
+#    Private/Public 下默认 Disabled，因此必须显式放行。
+New-NetFirewallRule -DisplayName "n2n ICMPv4 echo in" -Protocol ICMPv4 `
+  -IcmpType 8 -Direction Inbound -Action Allow -Profile Any
 ```
 
 测试用 supernode 可选用：在 Windows 上运行 n2n 源码构建的 `supernode.exe`，或复用局域网中已有的 supernode。
@@ -695,6 +708,13 @@ arp -a | grep 10.0.0.1
 - TAP 对端的 `arp -a` 中出现 `10.0.0.1` 对应的虚拟 MAC（首字节 `02`）；
 - `Get-NetAdapterStatistics` 的 `ReceivedBytes`/`SentBytes` 随 ping 增长；
 - Windows 侧 `arp -a` 没有该适配器的条目属正常现象（L3 设备不产生 ARP）。
+
+**验证记录（2026-11-25）**：Windows 10/11 x64 主机（edge `10.10.10.20/24`，适配器 `n2n0`）
+↔ WSL2 Ubuntu-24.04（Linux glibc 产物，edge `10.10.10.21/24`），supernode 跑在 WSL 内。
+结果：Windows `ping 10.10.10.21` 4/4 通（TTL=64，7–14ms），WSL `ping 10.10.10.20` 3/3 通
+（TTL=128，约 6ms），双向 0% 丢包。前提是已按 7.2 放行入站 ICMPv4 echo（Public 配置文件）。
+注意：wintun 是 L3 适配器（`MediaType=IP`、无 MAC），`New-NetNeighbor -LinkLayerAddress`
+会报 `ERROR_INVALID_PARAMETER`，ARP 由 shim 自行应答，不需要也不要配置静态邻居。
 
 ### 7.5 停止与清理
 

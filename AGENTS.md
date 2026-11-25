@@ -6,7 +6,7 @@
 
 - Go 1.25 CLI，通过 cgo 链接 n2n 3.1.1 的 `libn2n.a`，入口为 `cmd/n2n`。
 - 平台：macOS（arm64/amd64）、Linux（arm64 musl/glibc 已验证；amd64 仅脚本就绪）、
-  Windows（amd64 本地冒烟通过，跨主机数据面未验证）。
+  Windows（amd64 本地冒烟通过；Windows edge ↔ Linux edge 跨主机双向 `ping` 已验证）。
 - 总体方案见 [docs/N2NGo.md](docs/N2NGo.md)，各平台落地见 `docs/`。
 
 ## 常用命令

@@ -687,22 +687,27 @@ int tuntap_read(tuntap_dev *tuntap, unsigned char *buf, int len) {
         if(WaitForSingleObject(g_stop_event, 0) == WAIT_OBJECT_0)
             return 0;
 
-        events[0] = fn_get_read_wait_event(g_session);
-        events[1] = g_stop_event;
-        wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-        if(wait == WAIT_OBJECT_0 + 1)
-            return 0;
-        if(wait != WAIT_OBJECT_0)
-            return -1;
-
+        /* wintun requires polling WintunReceivePacket first and only waiting
+         * on the read-wait event when it reports ERROR_NO_MORE_ITEMS; the
+         * event is auto-reset and may already be consumed by earlier packets,
+         * so waiting first can stall while packets are still queued. */
         packet = fn_receive_packet(g_session, &packet_size);
         if(packet == NULL) {
             DWORD err = GetLastError();
-            if(err == ERROR_NO_MORE_ITEMS)
-                continue;
+
             if(err == ERROR_HANDLE_EOF)
                 return 0;
-            return -1;
+            if(err != ERROR_NO_MORE_ITEMS)
+                return -1;
+
+            events[0] = fn_get_read_wait_event(g_session);
+            events[1] = g_stop_event;
+            wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+            if(wait == WAIT_OBJECT_0 + 1)
+                return 0;
+            if(wait != WAIT_OBJECT_0)
+                return -1;
+            continue;
         }
 
         if(packet_size < 20 || (int)packet_size + ETH_FRAMESIZE > len) {
