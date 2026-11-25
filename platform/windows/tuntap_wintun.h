@@ -24,6 +24,11 @@ void tuntap_interrupt(struct tuntap_dev *tuntap);
  * Must be called before tuntap_open(); the pointer is copied. */
 void tuntap_win_set_community(const char *community);
 
+/* Enables carrying IPv6 (--ipv6): the shim then accepts 0x86DD frames and
+ * answers ICMPv6 neighbour solicitations for the adapter's addresses.
+ * Must be called before tuntap_open(). */
+void tuntap_win_enable_ipv6(int on);
+
 /* Lists adapters whose description mentions Wintun, for diagnostics. */
 void win_print_available_adapters(void);
 

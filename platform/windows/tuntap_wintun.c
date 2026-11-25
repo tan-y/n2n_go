@@ -4,13 +4,14 @@
  * n2n assumes an L2 TAP device. Wintun only provides an L3 IP interface, so
  * this file replaces n2n's src/win32/wintap.c and adds a small L3 <-> L2
  * shim:
- *   - tuntap_read  reads an IPv4 packet from wintun and builds an Ethernet
- *                  header (learned unicast, otherwise broadcast);
- *   - tuntap_write strips the Ethernet header, answers ARP requests and
- *                  learns IPv4 -> MAC mappings from incoming overlay traffic.
+ *   - tuntap_read  reads an IPv4/IPv6 packet from wintun and builds an Ethernet
+ *                  header (learned unicast, otherwise broadcast/multicast);
+ *   - tuntap_write strips the Ethernet header, answers ARP and ICMPv6 neighbour
+ *                  solicitations, and learns IP -> MAC mappings from incoming
+ *                  overlay traffic.
  *
  * Only one edge runs per process; the wintun session, read thread stop event
- * and learning table live in file-level state.
+ * and learning tables live in file-level state.
  */
 
 #include "defs.h"
@@ -64,9 +65,12 @@ static fn_wintun_get_adapter_luid_t fn_get_adapter_luid;
 /* State shared by the tun read thread and the n2n main loop */
 
 #define LEARN_MAX_ENTRIES 64
+#define LEARN6_MAX_ENTRIES 64
 #define LEARN_TTL_SECONDS 60
 #define ARP_QUEUE_DEPTH 8
-#define ARP_FRAME_MAX 64
+#define ARP_FRAME_MAX 160
+#define IP6_ADDR_MAX 8
+#define IP6_REFRESH_SECONDS 30
 #define ADAPTER_NAME_MAX 128
 #define WIN_RING_CAPACITY 0x400000 /* WintunStartSession ring size (power of two) */
 
@@ -75,6 +79,12 @@ typedef struct {
     uint8_t mac[ETH_ADDR_LEN];
     time_t seen;
 } learn_entry_t;
+
+typedef struct {
+    uint8_t ip[16];
+    uint8_t mac[ETH_ADDR_LEN];
+    time_t seen;
+} learn6_entry_t;
 
 typedef struct {
     int len;
@@ -91,6 +101,15 @@ static uint16_t g_mtu;
 
 static learn_entry_t g_learn[LEARN_MAX_ENTRIES];
 static int g_learn_count;
+
+static learn6_entry_t g_learn6[LEARN6_MAX_ENTRIES];
+static int g_learn6_count;
+
+static int g_ipv6_enabled;
+static NET_LUID g_luid;
+static uint8_t g_local_ip6[IP6_ADDR_MAX][16];
+static int g_local_ip6_count;
+static time_t g_ip6_refresh;
 
 static arp_frame_t g_arpq[ARP_QUEUE_DEPTH];
 static int g_arpq_head, g_arpq_tail, g_arpq_count;
@@ -330,6 +349,25 @@ static int configure_interface(NET_LUID luid, const char *ip, const char *mask, 
     return 0;
 }
 
+static int configure_interface6(NET_LUID luid, int mtu) {
+    MIB_IPINTERFACE_ROW iface;
+    NETIO_STATUS rc;
+
+    InitializeIpInterfaceEntry(&iface);
+    iface.InterfaceLuid = luid;
+    iface.Family = AF_INET6;
+    iface.NlMtu = (ULONG)mtu;
+    iface.SitePrefixLength = 0;
+
+    rc = SetIpInterfaceEntry(&iface);
+    if(rc != NO_ERROR) {
+        traceEvent(TRACE_WARNING, "SetIpInterfaceEntry(IPv6 mtu=%d) failed [%lu]",
+                   mtu, (unsigned long)rc);
+        return -1;
+    }
+    return 0;
+}
+
 static void teardown_wintun(void) {
     if(g_session != NULL) {
         if(fn_end_session != NULL)
@@ -349,6 +387,11 @@ static void teardown_wintun(void) {
     win_lock();
     g_learn_count = 0;
     memset(g_learn, 0, sizeof(g_learn));
+    g_learn6_count = 0;
+    memset(g_learn6, 0, sizeof(g_learn6));
+    g_local_ip6_count = 0;
+    memset(g_local_ip6, 0, sizeof(g_local_ip6));
+    g_ip6_refresh = 0;
     g_arpq_head = g_arpq_tail = g_arpq_count = 0;
     win_unlock();
     if(g_wintun != NULL) {
@@ -422,6 +465,136 @@ static int learn_lookup_locked(uint32_t ip, uint8_t mac[ETH_ADDR_LEN], time_t no
     }
     return 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/* IPv6 helpers (NDP uses the same learning table approach as ARP) */
+
+static int ip6_is_unspecified(const uint8_t *ip) {
+    int i;
+
+    for(i = 0; i < 16; i++)
+        if(ip[i] != 0)
+            return 0;
+    return 1;
+}
+
+static int ip6_is_multicast(const uint8_t *ip) {
+    return (ip[0] == 0xff);
+}
+
+static void ip6_multicast_mac(const uint8_t *ip, uint8_t mac[ETH_ADDR_LEN]) {
+    mac[0] = 0x33;
+    mac[1] = 0x33;
+    memcpy(mac + 2, ip + 12, 4);
+}
+
+static void learn6(const uint8_t *ip, const uint8_t *mac, time_t now) {
+    int i;
+
+    if(ip == NULL || mac == NULL)
+        return;
+    if((mac[0] & 0x01) || ip6_is_unspecified(ip) || ip6_is_multicast(ip))
+        return;
+
+    win_lock();
+    for(i = 0; i < g_learn6_count; i++) {
+        if(memcmp(g_learn6[i].ip, ip, 16) == 0) {
+            memcpy(g_learn6[i].mac, mac, ETH_ADDR_LEN);
+            g_learn6[i].seen = now;
+            win_unlock();
+            return;
+        }
+    }
+    if(g_learn6_count < LEARN6_MAX_ENTRIES) {
+        i = g_learn6_count++;
+    } else {
+        int oldest = 0;
+        time_t oldest_seen = g_learn6[0].seen;
+        for(i = 1; i < g_learn6_count; i++) {
+            if(g_learn6[i].seen < oldest_seen) {
+                oldest = i;
+                oldest_seen = g_learn6[i].seen;
+            }
+        }
+        i = oldest;
+    }
+    memcpy(g_learn6[i].ip, ip, 16);
+    memcpy(g_learn6[i].mac, mac, ETH_ADDR_LEN);
+    g_learn6[i].seen = now;
+    win_unlock();
+}
+
+/* Returns 1 and fills mac on hit, 0 on miss. Caller must hold g_lock. */
+static int learn6_lookup_locked(const uint8_t *ip, uint8_t mac[ETH_ADDR_LEN], time_t now) {
+    int i;
+
+    for(i = 0; i < g_learn6_count; i++) {
+        if(g_learn6[i].seen != 0 && now - g_learn6[i].seen > LEARN_TTL_SECONDS)
+            g_learn6[i].seen = 0;
+        if((g_learn6[i].seen != 0) && (memcmp(g_learn6[i].ip, ip, 16) == 0)) {
+            memcpy(mac, g_learn6[i].mac, ETH_ADDR_LEN);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Caches the adapter's IPv6 addresses (link-local and any configured global
+ * addresses). wintun is an L3 device, so Windows owns the addresses; the shim
+ * only needs them to answer neighbour solicitations. */
+static void refresh_local_ip6(void) {
+    PMIB_UNICASTIPADDRESS_TABLE table = NULL;
+    time_t now = time(NULL);
+    uint8_t addrs[IP6_ADDR_MAX][16];
+    int count = 0;
+    int have;
+    ULONG i;
+
+    win_lock();
+    have = (g_local_ip6_count > 0);
+    if((g_ip6_refresh != 0) &&
+       (now - g_ip6_refresh < (have ? IP6_REFRESH_SECONDS : 2))) {
+        win_unlock();
+        return;
+    }
+    g_ip6_refresh = now;
+    win_unlock();
+
+    if(GetUnicastIpAddressTable(AF_INET6, &table) != NO_ERROR)
+        return;
+
+    for(i = 0; (i < table->NumEntries) && (count < IP6_ADDR_MAX); i++) {
+        MIB_UNICASTIPADDRESS_ROW *row = &table->Table[i];
+
+        if(row->InterfaceLuid.Value != g_luid.Value)
+            continue;
+        if(row->DadState != IpDadStatePreferred)
+            continue;
+        memcpy(addrs[count], row->Address.Ipv6.sin6_addr.s6_addr, 16);
+        count++;
+    }
+    FreeMibTable(table);
+
+    win_lock();
+    memcpy(g_local_ip6, addrs, (size_t)count * 16);
+    g_local_ip6_count = count;
+    win_unlock();
+}
+
+static int local_ip6_owns(const uint8_t *addr) {
+    int i, hit = 0;
+
+    win_lock();
+    for(i = 0; i < g_local_ip6_count; i++) {
+        if(memcmp(g_local_ip6[i], addr, 16) == 0) {
+            hit = 1;
+            break;
+        }
+    }
+    win_unlock();
+    return hit;
+}
+
 
 static void arp_enqueue(const uint8_t *frame, int len) {
     if(len <= 0 || len > ARP_FRAME_MAX)
@@ -516,6 +689,116 @@ static void handle_arp_frame(const uint8_t *frame, int len) {
     build_arp_frame(reply, arp + 8, arp + 8, sender_ip, 2);
     arp_enqueue(reply, (int)sizeof(reply));
 }
+
+#define IP6_HDR_SIZE  40
+#define ICMP6_NA_SIZE 32
+
+static uint32_t csum_partial(uint32_t sum, const uint8_t *buf, size_t len) {
+    size_t i;
+
+    for(i = 0; i + 1 < len; i += 2)
+        sum += (uint32_t)((buf[i] << 8) | buf[i + 1]);
+    if(len & 1)
+        sum += (uint32_t)(buf[len - 1] << 8);
+    return sum;
+}
+
+static uint16_t csum_fold(uint32_t sum) {
+    while(sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    return (uint16_t)(~sum);
+}
+
+static uint16_t icmp6_checksum(const uint8_t *src, const uint8_t *dst,
+                               const uint8_t *icmp, size_t len) {
+    uint32_t sum = 0;
+    uint8_t pseudo[4];
+
+    sum = csum_partial(sum, src, 16);
+    sum = csum_partial(sum, dst, 16);
+    pseudo[0] = (uint8_t)(len >> 24);
+    pseudo[1] = (uint8_t)(len >> 16);
+    pseudo[2] = (uint8_t)(len >> 8);
+    pseudo[3] = (uint8_t)len;
+    sum = csum_partial(sum, pseudo, sizeof(pseudo));
+    sum += 58; /* next header: ICMPv6 */
+    return csum_fold(csum_partial(sum, icmp, len));
+}
+
+static int build_na_frame(uint8_t *frame, const uint8_t *dst_mac,
+                          const uint8_t *our_addr, const uint8_t *dst_addr,
+                          const uint8_t *target_addr) {
+    ether_hdr_t *eth = (ether_hdr_t *)frame;
+    uint8_t *ip = frame + ETH_FRAMESIZE;
+    uint8_t *icmp = ip + IP6_HDR_SIZE;
+    uint16_t c;
+
+    memcpy(eth->dhost, dst_mac, ETH_ADDR_LEN);
+    memcpy(eth->shost, g_mac, ETH_ADDR_LEN);
+    eth->type = htons(0x86DD);
+
+    memset(ip, 0, IP6_HDR_SIZE);
+    ip[0] = 0x60;
+    ip[4] = 0;
+    ip[5] = ICMP6_NA_SIZE;
+    ip[6] = 58;  /* ICMPv6 */
+    ip[7] = 255; /* hop limit */
+    memcpy(ip + 8, our_addr, 16);  /* source = solicited target */
+    memcpy(ip + 24, dst_addr, 16); /* destination = solicitor */
+
+    memset(icmp, 0, ICMP6_NA_SIZE);
+    icmp[0] = 136; /* Neighbor Advertisement */
+    icmp[4] = 0x60; /* Solicited | Override */
+    memcpy(icmp + 8, target_addr, 16);
+    icmp[24] = 2; /* target link-layer address */
+    icmp[25] = 1; /* length in 8-byte units */
+    memcpy(icmp + 26, g_mac, ETH_ADDR_LEN);
+
+    c = icmp6_checksum(ip + 8, ip + 24, icmp, ICMP6_NA_SIZE);
+    icmp[2] = (uint8_t)(c >> 8);
+    icmp[3] = (uint8_t)(c & 0xff);
+
+    return ETH_FRAMESIZE + IP6_HDR_SIZE + ICMP6_NA_SIZE;
+}
+
+/* Answers an ICMPv6 neighbour solicitation for one of the local addresses.
+ * Returns 1 when a reply was queued (the solicitation need not reach Windows),
+ * 0 otherwise. */
+static int handle_ns_frame(const uint8_t *frame, int len) {
+    const ether_hdr_t *eth = (const ether_hdr_t *)frame;
+    const uint8_t *ip, *icmp;
+    uint8_t reply[ETH_FRAMESIZE + IP6_HDR_SIZE + ICMP6_NA_SIZE];
+    uint8_t dst_mac[ETH_ADDR_LEN];
+    int n;
+
+    if(len < ETH_FRAMESIZE + IP6_HDR_SIZE + 24)
+        return 0;
+    ip = frame + ETH_FRAMESIZE;
+    if(((ip[0] >> 4) != 6) || (ip[6] != 58))
+        return 0;
+    icmp = ip + IP6_HDR_SIZE;
+    if(icmp[0] != 135) /* Neighbor Solicitation */
+        return 0;
+
+    learn6(ip + 8, eth->shost, time(NULL));
+
+    if(ip6_is_unspecified(ip + 8)) /* duplicate address detection */
+        return 0;
+
+    refresh_local_ip6();
+    if(!local_ip6_owns(icmp + 8))
+        return 0;
+
+    if(eth->shost[0] & 0x01)
+        ip6_multicast_mac(ip + 8, dst_mac);
+    else
+        memcpy(dst_mac, eth->shost, ETH_ADDR_LEN);
+
+    n = build_na_frame(reply, dst_mac, icmp + 8, ip + 8, icmp + 8);
+    arp_enqueue(reply, n);
+    return 1;
+}
+
 
 /* ------------------------------------------------------------------------- */
 /* Public tuntap API (see include/n2n.h) */
@@ -613,6 +896,7 @@ int tuntap_open(tuntap_dev *device, char *dev, const char *address_mode,
 
     memset(&luid, 0, sizeof(luid));
     fn_get_adapter_luid(g_adapter, &luid);
+    g_luid = luid;
 
     g_mtu = (uint16_t)((mtu > 0) ? mtu : 1400);
     if(configure_interface(luid, device_ip, device_mask, (int)g_mtu) != 0) {
@@ -641,6 +925,15 @@ int tuntap_open(tuntap_dev *device, char *dev, const char *address_mode,
     g_local_ip = (device_ip != NULL && device_ip[0] != '\0') ? inet_addr(device_ip) : 0;
     g_local_mask = (device_mask != NULL && device_mask[0] != '\0') ? inet_addr(device_mask) : 0;
     g_open = 1;
+
+    if(g_ipv6_enabled) {
+        /* Windows assigns the link-local address itself; the shim only reads it
+         * back so it can answer neighbour solicitations. */
+        configure_interface6(luid, (int)g_mtu);
+        refresh_local_ip6();
+        traceEvent(TRACE_NORMAL, "IPv6 enabled on %s: %d local address(es) visible",
+                   g_if_name, g_local_ip6_count);
+    }
 
     memcpy(device->mac_addr, g_mac, sizeof(g_mac));
     device->ip_addr = g_local_ip;
@@ -716,8 +1009,43 @@ int tuntap_read(tuntap_dev *tuntap, unsigned char *buf, int len) {
         }
 
         version = (uint8_t)(packet[0] >> 4);
+        if(version == 6) {
+            uint8_t dst_ip6[16];
+
+            if(!g_ipv6_enabled || packet_size < 40) {
+                fn_release_receive_packet(g_session, packet);
+                continue;
+            }
+
+            refresh_local_ip6();
+            memcpy(dst_ip6, packet + 24, 16); /* IPv6 destination */
+            now = time(NULL);
+
+            eth = (ether_hdr_t *)buf;
+            win_lock();
+            if(ip6_is_multicast(dst_ip6)) {
+                ip6_multicast_mac(dst_ip6, dst_mac);
+            } else if(!learn6_lookup_locked(dst_ip6, dst_mac, now)) {
+                /* No NDP entry yet: use the solicited-node multicast MAC so the
+                 * first packet reaches every on-link IPv6 node. */
+                dst_mac[0] = 0x33;
+                dst_mac[1] = 0x33;
+                dst_mac[2] = 0xff;
+                dst_mac[3] = dst_ip6[13];
+                dst_mac[4] = dst_ip6[14];
+                dst_mac[5] = dst_ip6[15];
+            }
+            win_unlock();
+
+            memcpy(eth->dhost, dst_mac, ETH_ADDR_LEN);
+            memcpy(eth->shost, g_mac, ETH_ADDR_LEN);
+            eth->type = htons(0x86DD);
+            memcpy(buf + ETH_FRAMESIZE, packet, packet_size);
+            fn_release_receive_packet(g_session, packet);
+
+            return (int)packet_size + ETH_FRAMESIZE;
+        }
         if(version != 4) {
-            /* Wintun is IPv4-only in this MVP; drop IPv6 and anything else. */
             fn_release_receive_packet(g_session, packet);
             continue;
         }
@@ -763,17 +1091,30 @@ int tuntap_write(tuntap_dev *tuntap, unsigned char *buf, int len) {
         return len;
     }
 
-    if(type != 0x0800) {
-        /* Drop IPv6 and other L2 protocols: wintun only carries IPv4. */
+    if(type != 0x0800 && type != 0x86DD) {
+        /* Other L2 protocols are not carried by this shim. */
         return len;
     }
+
+    if(type == 0x86DD && !g_ipv6_enabled)
+        return len;
 
     /* Frames for another unicast MAC are not meant for this interface; the
      * multicast/broadcast bit is allowed (wintun accepts those as-is). */
     if(!(eth->dhost[0] & 0x01) && memcmp(eth->dhost, g_mac, ETH_ADDR_LEN) != 0)
         return len;
 
-    if(len > ETH_FRAMESIZE + 19) {
+    if(type == 0x86DD) {
+        /* Answer NDP requests for our own addresses; wintun is L3 and its
+         * stack does not emit neighbour advertisements. */
+        if(handle_ns_frame(buf, len))
+            return len;
+        if(len >= ETH_FRAMESIZE + IP6_HDR_SIZE) {
+            const uint8_t *ip6 = buf + ETH_FRAMESIZE;
+            if((ip6[0] >> 4) == 6)
+                learn6(ip6 + 8, eth->shost, time(NULL));
+        }
+    } else if(len > ETH_FRAMESIZE + 19) {
         uint8_t version = (uint8_t)(buf[ETH_FRAMESIZE] >> 4);
         if(version == 4) {
             uint32_t src_ip;
@@ -865,6 +1206,10 @@ void tuntap_win_set_community(const char *community) {
         return;
     strncpy(g_guid_seed, community, sizeof(g_guid_seed) - 1);
     g_guid_seed[sizeof(g_guid_seed) - 1] = '\0';
+}
+
+void tuntap_win_enable_ipv6(int on) {
+    g_ipv6_enabled = (on != 0);
 }
 
 static int g_wsa_started;

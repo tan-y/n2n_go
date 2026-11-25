@@ -23,6 +23,7 @@
 
 #include "n2n.h"
 #include "auth.h"
+#include "speck.h"
 #include "edge_glue.h"
 
 #ifdef _WIN32
@@ -90,6 +91,14 @@ static void cleanup(n2n_go_edge_t *e) {
     if(e->conf.federation_public_key != NULL) {
         free(e->conf.federation_public_key);
         e->conf.federation_public_key = NULL;
+    }
+    if(e->conf.public_key != NULL) {
+        free(e->conf.public_key);
+        e->conf.public_key = NULL;
+    }
+    if(e->conf.shared_secret_ctx != NULL) {
+        free(e->conf.shared_secret_ctx);
+        e->conf.shared_secret_ctx = NULL;
     }
 
     if(e->eee != NULL) {
@@ -192,6 +201,11 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
     if(cfg->header_encryption)
         e->conf.header_encryption = HEADER_ENCRYPTION_ENABLED;
 
+    /* dev_desc doubles as the username in user-password authentication, so it
+     * has to be set before the private key is bound to it below. */
+    if((cfg->description != NULL) && (cfg->description[0] != '\0'))
+        strncpy((char *)e->conf.dev_desc, cfg->description, N2N_DESC_SIZE - 1);
+
     if((cfg->federation_public_key != NULL) && (cfg->federation_public_key[0] != '\0')) {
         e->conf.federation_public_key = calloc(1, sizeof(n2n_private_public_key_t));
         if(e->conf.federation_public_key == NULL) {
@@ -208,14 +222,57 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
         }
     }
     if((cfg->auth_password != NULL) && (cfg->auth_password[0] != '\0')) {
-        e->conf.shared_secret = calloc(1, sizeof(n2n_private_public_key_t));
-        if(e->conf.shared_secret == NULL) {
-            set_err(errbuf, errbuf_len, "out of memory allocating the authentication password");
+        if(e->conf.shared_secret == NULL) { /* may already be set from N2N_PASSWORD */
+            e->conf.shared_secret = calloc(1, sizeof(n2n_private_public_key_t));
+            if(e->conf.shared_secret == NULL) {
+                set_err(errbuf, errbuf_len, "out of memory allocating the authentication password");
+                cleanup(e);
+                free(e);
+                return NULL;
+            }
+        }
+        generate_private_key(*(e->conf.shared_secret), (char *)cfg->auth_password);
+
+        /* Finish the crypto setup that n2n's src/edge.c performs after loading
+         * the configuration: default federation key when -P is absent, bind the
+         * private key to the username, derive the public key and shared secret,
+         * and prepare the Speck context used to protect the header key. */
+        if(e->conf.federation_public_key == NULL) {
+            e->conf.federation_public_key = calloc(1, sizeof(n2n_private_public_key_t));
+            if(e->conf.federation_public_key == NULL) {
+                set_err(errbuf, errbuf_len, "out of memory allocating the default federation public key");
+                cleanup(e);
+                free(e);
+                return NULL;
+            }
+            traceEvent(TRACE_WARNING, "using default federation public key; FOR TESTING ONLY, usage of a custom federation name and key (-P) is highly recommended!");
+            generate_private_key(*(e->conf.federation_public_key), &FEDERATION_NAME[1]);
+            generate_public_key(*(e->conf.federation_public_key), *(e->conf.federation_public_key));
+        }
+        bind_private_key_to_username(*(e->conf.shared_secret), (char *)e->conf.dev_desc);
+        e->conf.public_key = calloc(1, sizeof(n2n_private_public_key_t));
+        if(e->conf.public_key == NULL) {
+            set_err(errbuf, errbuf_len, "out of memory allocating the public key");
             cleanup(e);
             free(e);
             return NULL;
         }
-        generate_private_key(*(e->conf.shared_secret), (char *)cfg->auth_password);
+        generate_public_key(*(e->conf.public_key), *(e->conf.shared_secret));
+        generate_shared_secret(*(e->conf.shared_secret), *(e->conf.shared_secret),
+                               *(e->conf.federation_public_key));
+        e->conf.shared_secret_ctx = calloc(1, sizeof(speck_context_t));
+        if(e->conf.shared_secret_ctx == NULL) {
+            set_err(errbuf, errbuf_len, "out of memory allocating the shared secret context");
+            cleanup(e);
+            free(e);
+            return NULL;
+        }
+        speck_init((speck_context_t**)&e->conf.shared_secret_ctx,
+                   *(e->conf.shared_secret), 128);
+
+        /* n2n forces header encryption for user-password authentication. */
+        if(e->conf.header_encryption != HEADER_ENCRYPTION_ENABLED)
+            e->conf.header_encryption = HEADER_ENCRYPTION_ENABLED;
     }
 
     e->conf.local_port = cfg->local_port;
@@ -234,9 +291,6 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
     if(cfg->register_ttl >= 0)
         e->conf.register_ttl = cfg->register_ttl;
     e->conf.tuntap_ip_mode = cfg->auto_address ? TUNTAP_IP_MODE_SN_ASSIGN : TUNTAP_IP_MODE_STATIC;
-
-    if((cfg->description != NULL) && (cfg->description[0] != '\0'))
-        strncpy((char *)e->conf.dev_desc, cfg->description, N2N_DESC_SIZE - 1);
 
     for(i = 0; i < cfg->sn_num; i++) {
         if(edge_conf_add_supernode(&e->conf, cfg->supernodes[i]) != 0) {
@@ -275,6 +329,7 @@ n2n_go_edge_t *n2n_go_edge_create(const n2n_go_config_t *cfg, char *errbuf, int 
 #endif
 #ifdef _WIN32
     tuntap_win_set_community(cfg->community);
+    tuntap_win_enable_ipv6(cfg->ipv6);
 #endif
 
     if(tuntap_open(&e->dev, (char *)((cfg->device != NULL) ? cfg->device : ""),

@@ -39,15 +39,19 @@ Windows 与 macOS/Linux 的差异不在协议层，而在设备层、构建环�
 - 复用现有 Go CLI、配置校验与生命周期设计；仅补 Windows 平台分支。
 - 原生构建脚本、补丁、Windows 构建与运行说明。
 - 运行验收：与另一个 edge（Linux/macOS 任一）通过 supernode 双向 `ping` 通。
+- 头部加密（`-H`）与 user-password 认证（`-J`/`-P`）：`-H` 需 `-k`；`-J` 需 `-k` 且
+  `-A cc20|speck`，`-I` 同时作为用户名；supernode 需用 `-c` 预注册社区，`-J` 社区还需
+  `* <user> <public key>` 行（由 `n2n-keygen` 生成）。
+- IPv6 / NDP（`--ipv6`）：承载 `0x86DD`，按学习表/组播映射选择目的 MAC，并为适配器上的
+  IPv6 地址应答 ICMPv6 邻居通告；地址由 Windows 自动生成（link-local）或用户自行配置。
 
 **明确不做（后续迭代）**
 
 - tap-windows6 作为可切换的设备层（仅保留 n2n 上游实现作参考，不进首期产物）；
-- IPv6 / NDP、DHCP 地址模式；
+- DHCP 地址模式（方案见 §13）；
 - Windows 服务（SCM）化、托盘/GUI、安装器与代码签名；
 - `supernode` 子命令（测试用原生 `supernode.exe`）；
 - `arm64`/`386` 产物；
-- 头部加密（`-H`）、联邦认证（`-J/-P`）；
 - 非 IP 以太网协议（LLDP、STP 等）的透传。
 
 **验收标准**
@@ -67,7 +71,7 @@ Windows 与 macOS/Linux 的差异不在协议层，而在设备层、构建环�
 | 驱动依赖 | 无 | `CONFIG_TUN` + `/dev/net/tun` | 无内核驱动；用户态 `wintun.dll` |
 | 帧格式 | 伪以太网头 + IPv4 载荷 | 原生以太网帧 | shim 产出/消费原生以太网帧；wintun 侧是 IP 包 |
 | ARP / 广播 | ARP 无意义，直接丢弃 | 正常可用 | Windows 自身不 ARP；shim 实现 ARP 应答，出方向按需广播/单播 |
-| IPv6 | 首期不支持 | 首期不启用 | 首期在 shim 丢弃 0x86DD；不配置 IPv6 地址 |
+| IPv6 | 首期不支持 | 首期不启用 | `--ipv6` 承载 0x86DD 并应答 NDP；接口使用 Windows 自动生成的 link-local |
 | MAC | 适配层自行生成 | 由 Go 生成，TAP 接受 | shim 维护虚拟 MAC（`-m` 显式指定，否则确定性派生） |
 | 权限 | root | root 或 `CAP_NET_ADMIN` | Administrators + UAC |
 | 设备名 | `utun` / `utunN`，由系统分配 | 空名自动分配 `tapN` | 空名默认 `n2n0`；适配器创建后随进程删除 |
@@ -347,9 +351,10 @@ Windows IPv4 栈
 peer → n2n edge → tuntap_write
     │ 以太网帧
     ├─ ARP request（target IP == 本端 IP）→ 合成 ARP reply，入队 → 下一次 tuntap_read 发出
-    ├─ IPv4（dst MAC 是本端虚拟 MAC 或广播）→ 去头 → WintunSendPacket → Windows IPv4 栈
-    ├─ 其他以太类型（含 IPv6 0x86DD）→ 丢弃
-    └─ 从 IPv4 帧的 src 学习 IP→MAC
+    ├─ ICMPv6 NS（target == 本端 IPv6）→ 合成 NA，入队，不再写入 wintun
+    ├─ IPv4/IPv6（dst MAC 是本端虚拟 MAC 或广播/组播）→ 去头 → WintunSendPacket → Windows 栈
+    ├─ 其他以太类型 → 丢弃
+    └─ 从 IPv4 源地址或 IPv6 源地址学习 IP→MAC
 ```
 
 **虚拟 MAC**：
@@ -364,23 +369,29 @@ peer → n2n edge → tuntap_write
 - wintun 是 L3，Windows 自身不会发 ARP；但对端的 Linux/macOS TAP 会为 `-a` 地址发 ARP 请求；
 - shim 收到 `0x0806`、opcode=1、target IP 等于本端地址时，合成 opcode=2 的 ARP reply（sender MAC/IP = 本端虚拟 MAC/IP，target = 请求方），放入读队列，由 `tuntap_read` 取走；
 - 启动时额外入队一个 gratuitous ARP（广播，sender/target 都是本端地址），帮助对端与 n2n 边缘尽快学习虚拟 MAC；
-- 首期只处理 IPv4 ARP；IPv6 的 NDP 不实现。
+- IPv6 对称地处理 NDP：收到 `0x86DD` + ICMPv6 NS（type 135）、且 target 属于本适配器的 IPv6
+  地址时，合成 NA（type 136，Solicited|Override，含 target link-layer address 选项），
+  从以太源 MAC 回给请求方；本端地址列表由 `GetUnicastIpAddressTable(AF_INET6)` 读取并按
+  30 秒节流刷新（Windows 自己生成 link-local，shim 不配置地址）。
 
 **出方向（tuntap_read）**：
 
 - 先检查 ARP 回复队列，有则直接返回；
 - 否则等待 wintun 读事件，`WintunReceivePacket` 取出一个 IP 包；
-- 按首字节版本号选择 ethertype：IPv4 `0x0800`，IPv6 `0x86DD`（首期直接丢弃并继续读）；
-- 目的 MAC：查学习表（按目的 IPv4）；未命中、广播地址 `255.255.255.255` 或 IPv4 组播时回退广播 `ff:ff:ff:ff:ff:ff`；
-- 组播地址按 RFC 1112 映射为 `01:00:5e:xx:xx:xx` 也可行，但首期统一用广播，减少实现差异；
+- 按首字节版本号选择 ethertype：IPv4 `0x0800`，IPv6 `0x86DD`（未开启 `--ipv6` 时丢弃）；
+- 目的 MAC：IPv4 查学习表（未命中、`255.255.255.255` 或 IPv4 组播时回退广播）；IPv6 组播按
+  `33:33:xx:xx:xx:xx` 映射，单播未命中时回退目的地址的 solicited-node 组播 MAC
+  `33:33:ff:xx:xx:xx`，命中学习表则走单播；
+- IPv4 组播首期统一用广播，减少实现差异；IPv6 必须用组播映射（IPv6 没有广播）；
 - 返回长度 = 14 + IP 包长度，直接写进 n2n 提供的 `buf`。
 
 **入方向（tuntap_write）**：
 
-- 长度 < 14 或以太类型不是 ARP/IPv4 时丢弃；
+- 长度 < 14 或以太类型不是 ARP/IPv4/IPv6 时丢弃；
 - ARP request 命中本端地址 → 入队 reply，不写 wintun；
-- IPv4：校验目的 MAC 是本端 MAC 或广播后，去掉 14 字节头，`WintunAllocateSendPacket(len)` 拷贝后 `WintunSendPacket`；
-- 从 IPv4 的源地址/源 MAC 更新学习表（TTL 60 秒，容量 64 项，LRU 淘汰）；
+- IPv6 NS 命中本端地址 → 入队合成的 NA，不写 wintun；其他 IPv6 帧照常写入；
+- IPv4/IPv6：校验目的 MAC 是本端 MAC 或组播/广播后，去掉 14 字节头，`WintunAllocateSendPacket(len)` 拷贝后 `WintunSendPacket`；
+- 从 IPv4/IPv6 的源地址/源 MAC 更新学习表（TTL 60 秒，容量 64 项，LRU 淘汰）；
 - ring 满导致 `WintunAllocateSendPacket` 返回 NULL 时丢弃该帧并记录限频日志，不阻塞 edge 主循环。
 
 **组播与 `drop_multicast`（关键）**：
@@ -449,7 +460,9 @@ SetIpInterfaceEntry(&row);
 - `DadState = IpDadStatePreferred` 跳过重复地址检测，避免点对点适配器上 DAD 超时；
 - `SetIpInterfaceEntry` 若传入 `SitePrefixLength != 0` 会失败（上游 `wintap.c` 的注释也记录了这一点）；
 - 适配器在 `WintunStartSession` 之后即为 Up，不需要 TAP 的 `TAP_IOCTL_SET_MEDIA_STATUS`；
-- 不配置 IPv6 地址；Windows 仍可能在适配器上生成 link-local/ND 流量，shim 直接丢弃 `0x86DD`；
+- 不主动配置 IPv6 地址；`--ipv6` 时 Windows 会为适配器生成 link-local，shim 通过
+  `GetUnicastIpAddressTable(AF_INET6)` 读取它（以及用户自行添加的全局地址）用于 NDP 应答；
+  未开启 `--ipv6` 时仍丢弃 `0x86DD`；
 - 退出时不清理地址/MTU：适配器本身会被删除，配置随之消失。
 
 ### 5.6 停止与唤醒
@@ -712,9 +725,110 @@ arp -a | grep 10.0.0.1
 **验证记录（2026-11-25）**：Windows 10/11 x64 主机（edge `10.10.10.20/24`，适配器 `n2n0`）
 ↔ WSL2 Ubuntu-24.04（Linux glibc 产物，edge `10.10.10.21/24`），supernode 跑在 WSL 内。
 结果：Windows `ping 10.10.10.21` 4/4 通（TTL=64，7–14ms），WSL `ping 10.10.10.20` 3/3 通
-（TTL=128，约 6ms），双向 0% 丢包。前提是已按 7.2 放行入站 ICMPv4 echo（Public 配置文件）。
+（TTL=128，约 6ms），双向 0% 丢包。
+
+数据面矩阵（`build\datapath-matrix.ps1`，2026-11-25 18:49 全 PASS）：ICMP 32B/1200B/1262B（MTU 临界）/1400B（分片重组）均 0% 丢包；
+TCP 8 MiB 上行与回程 sha256 一致（往返约 0.6 MiB/s）；UDP 200×1000B 回环 200/200、无异常尺寸；
+3 分钟 1200B 长稳 180/180（RTT 2–37ms，avg 5.6ms）。吞吐数字只代表「经 supernode 中继 + 用户态转发」的路径，
+未覆盖直连 P2P、Windows↔macOS 对端以及 Win10/Win11 版本差异。
+
+前提是已按 7.2 放行入站 ICMPv4 echo（Public 配置文件）。
 注意：wintun 是 L3 适配器（`MediaType=IP`、无 MAC），`New-NetNeighbor -LinkLayerAddress`
 会报 `ERROR_INVALID_PARAMETER`，ARP 由 shim 自行应答，不需要也不要配置静态邻居。
+
+### 7.4.1 头部加密（`-H`）与 user-password 认证（`-J`）
+
+前置条件：
+
+- supernode 必须用 `-c <community file>` 预注册社区；未注册的社区无法解密加密头，会被丢弃。
+- `-J` 的社区文件除社区名外，还要有用户公钥行：`* <user> <public key>`。该行可用
+  `n2n-keygen <user> <password>`（源码 `third_party/n2n/tools/n2n-keygen.c`）生成，
+  因此在 WSL/Linux 侧可这样构建一次性工具：
+  `gcc -I third_party/n2n-src/include third_party/n2n/tools/n2n-keygen.c third_party/lib/linux/amd64/libn2n.a -o build/n2n-keygen -lpthread`。
+- 同一社区不能混用明文头与加密头：supernode 会按首个成功解析的包锁定模式。
+- `-J` 会在 C 层强制启用头部加密，并要求流式加密算法；Go 层已校验 `-J` 必须同时给
+  `-k` 且 `-A cc20|speck`。
+
+示例社区文件：
+
+```
+demo-h
+demo-j
+* user1 G1x-yjPAMTzXxQz7AOlAnC+cmgJwRQ6+y0qmfdPJ4de
+```
+
+启动：
+
+```bash
+# supernode
+sudo ./bin/supernode-linux-amd64-glibc -f -v -p 7777 -c /tmp/community.list
+
+# 对端 1：只有头部加密，载荷 AES
+sudo ./bin/n2n-linux-amd64-glibc edge -c demo-h -l 127.0.0.1:7777 \
+  -a 10.10.20.21/24 -d n2n1 -k testkey -A aes -H
+
+# 对端 2：user-password 认证
+sudo ./bin/n2n-linux-amd64-glibc edge -c demo-j -l 127.0.0.1:7777 \
+  -a 10.10.30.21/24 -d n2n2 -J testpass -I user1 -k testkey -A cc20
+```
+
+```powershell
+# Windows 侧（管理员）
+.\n2n-windows-amd64.exe edge -c demo-h -l <supernode>:7777 -a 10.10.20.1/24 -d n2n0 `
+  -k testkey -A aes -H
+.\n2n-windows-amd64.exe edge -c demo-j -l <supernode>:7777 -a 10.10.30.1/24 -d n2n1 `
+  -J testpass -I user1 -k testkey -A cc20
+```
+
+**验证记录（2026-11-25，WSL2 Ubuntu-24.04，Linux glibc 产物）**
+
+- 修复前 `-J` 会在 `memcpy(eee->conf.auth.token, conf.public_key, ...)` 处 SIGSEGV：
+  `internal/n2n/edge_glue.c` 只生成了私有 key，缺少 n2n `src/edge.c` 的后续步骤。
+  现已补齐默认 federation key、`bind_private_key_to_username`、`public_key`、
+  `generate_shared_secret` 与 `speck_init`，并在 cleanup 中释放。
+- `-H`（`demo-h`）：supernode 日志出现 `locked community 'demo-h' to encrypted headers`，
+  说明加密头被成功解析并按加密模式锁定。
+- `-J`（`demo-j`）：supernode 日志出现 `created edge ...`，edge 日志出现
+  `[OK] edge <<< ================ >>> supernode`，即 user-password 握手成功。
+- Windows 侧的 `-H`/`-J` 双向 ping 由 `build\verify-auth.ps1` 在管理员 PowerShell 中执行
+  （脚本会停掉旧 edge、按两个阶段启动并做正向/反向 ping）。
+- **Windows 侧结果（2026-11-25）**：`-H` 正向/反向 ping 均 PASS；`-J` 正向/反向 ping 均
+  PASS。说明 wintun L3 shim 与头部加密、user-password 认证路径端到端可用。
+
+### 7.4.2 IPv6 / NDP（`--ipv6`）
+
+两端都要加 `--ipv6`（它会强制 `drop_multicast = 0`，否则 NDP 的 `33:33:...` 组播会被 n2n 丢弃）：
+
+```bash
+# Linux/WSL 对端
+sudo ./bin/n2n-linux-amd64-glibc edge -c demo-v6 -l <supernode>:7777 \
+  -a 10.10.50.21/24 -d n2n3 --ipv6
+ip -6 addr show dev n2n3 scope link      # 取 fe80:: 地址
+```
+
+```powershell
+# Windows 端（管理员）
+.\n2n-windows-amd64.exe edge -c demo-v6 -l <supernode>:7777 -a 10.10.50.1/24 -d n2n2 --ipv6
+Get-NetIPAddress -InterfaceAlias n2n2 -AddressFamily IPv6    # 取 fe80:: 与 InterfaceIndex
+# 链路本地地址需要 zone：%<InterfaceIndex>
+ping -6 fe80::<wsl-peer-ll>%<ifIndex>
+```
+
+- 正向（Windows → WSL）：shim 用学习表/组播映射封装 `0x86DD`；对端 Link-local 直接可达。
+- 反向（WSL → Windows）：Linux 先发 ICMPv6 NS，shim 命中本端地址后合成 NA；之后走单播。
+- 防火墙需放行入站 ICMPv6（脚本 `build\verify-ipv6.ps1` 会自动创建 `n2n ICMPv6 In` 规则）。
+- 未配置全局 IPv6 时只有 link-local；需要 `fd00::/64` 之类的地址请用
+  `New-NetIPAddress -InterfaceAlias n2n2 -AddressFamily IPv6 -IPAddress fd00::1 -PrefixLength 64`。
+
+**验证记录（2026-11-25，WSL 侧）**：`n2n3 --ipv6` 启动后 `n2n3` 自动获得
+`fe80::185c:40ff:fe6a:36db/64`；supernode 日志出现 `created edge` 且 `demo-v6` 被锁定为
+明文头。
+
+**Windows 侧结果（2026-11-25）**：Windows 适配器获得 link-local 并累计 1 个本地 IPv6 地址；
+Windows → WSL 与 WSL → Windows 的链路本地 ping 均 PASS，后者经过 shim 的 NA 合成，说明
+NDP 应答端到端可用。测试中出现的两次失败都与 shim 无关：Linux 为 link-local 目的地址选路
+时命中 `eth0` 的 `fe80::/64`；`Get-NetIPAddress` 返回值自带 `%zone`，与脚本追加的作用域
+重复。`build/wsl-v6-ping.sh` 与 `build\verify-ipv6.ps1` 现已显式使用 `%<ifindex>` 并去重。
 
 ### 7.5 停止与清理
 
@@ -769,7 +883,7 @@ Get-NetAdapter -Name n2n0 -ErrorAction SilentlyContinue       # 应不存在
 | wintun 是 L3，n2n 是 L2 | 帧语义不匹配 | 首期实现 shim（封装/解封装 + ARP 应答 + MAC 学习），并明确非 IP 协议不透传 |
 | 广播封装依赖组播透传 | 默认配置下 ARP/首包被丢弃 | 强制 `drop_multicast = 0`，并在启动日志中显式提示 |
 | 未命中时广播 | 首包延迟、广播流量增加 | 收到对端帧后学习 IP→MAC，60 秒 TTL 内走单播；后续可加 ARP 客户端主动解析 |
-| IPv6/NDP 不支持 | IPv6 用户不可用 | 首期不配置 IPv6；shim 丢弃 `0x86DD`；文档声明 |
+| IPv6/NDP | 需要 link-local 之外的地址时，用户必须自行配置 | `--ipv6` 承载并应答 NDP；link-local 开箱可用；全局地址用 `New-NetIPAddress` 添加 |
 | wintun.dll 缺失/版本不匹配/架构不符 | 无法启动 | 构建脚本复制；启动校验版本与架构；发布包固定 0.14.1 |
 | 需要管理员/UAC | 普通用户无法启动 | 启动前提升检测 + 明确提示；后续安装器/服务化 |
 | 适配器名冲突 | 创建失败 | 报错并提示换 `-d`；不共享他人适配器 |
@@ -800,8 +914,55 @@ Get-NetAdapter -Name n2n0 -ErrorAction SilentlyContinue       # 应不存在
 ## 12. 待确认问题
 
 1. 首期是否必须支持 Windows wintun ↔ Linux/macOS TAP 的双向互通？（本方案按“必须”设计，因此实现了 ARP 应答与 MAC 学习）
-2. 是否需要首期支持 IPv6/NDP？当前方案明确不支持。
+2. 是否需要首期支持 IPv6/NDP？——已实现 `--ipv6`（承载 + NDP 应答）；DHCP 仍在 §13 规划中。
 3. `wintun.dll` 是固定随包分发 0.14.1，还是允许用户自行替换并只做最低版本校验？
 4. 是否接受首期只支持 `windows/amd64`，`arm64` 延后？
 5. 是否需要保留 tap-windows6 作为可切换的设备层（当前只作为上游参考）？
 6. 是否需要首期暴露 `-x <metric>` 或自动修改防火墙？
+
+## 13. DHCP 地址模式方案（待实现）
+
+现状：Windows 只支持静态 IPv4（`-a IPv4/CIDR`）与 supernode 分配（`-a auto`）；`-a auto`
+走的是 n2n 的 `SN_ASSIGN`，不是 DHCP。n2n 上游本身支持 `-a dhcp:0.0.0.0`（配合 `-r`），
+语义是把接口地址交给 DHCP，并在循环中定期重新读取地址。
+
+设计目标：新增 `-a dhcp`，由覆盖网内的 DHCP 服务器（例如某一台 Linux edge 上跑 dnsmasq）
+分配地址；Windows 端不实现 DHCP 协议栈，而是让 Windows 自带 DHCP 客户端在 wintun 适配器上工作。
+
+改动点：
+
+1. `internal/config/config.go`：`-a dhcp` 解析为新的 `DHCPAddress` 标记；与 `auto` 互斥；
+   非 Windows 平台先返回“不支持”（macOS utun 没有 DHCP 语义）。`Validate` 保持不要求
+   `-k` 等无关项；`-r` 在 n2n 上游文档中与 DHCP 搭配使用，但不强制。
+2. `internal/n2n/edge_glue.c`：`tuntap_ip_mode = TUNTAP_IP_MODE_DHCP`，`tuntap_open` 的
+   `address_mode` 传 `"dhcp"`，`tuntap_priv_conf.ip_mode` 写 `"dhcp"`，地址字段传空；
+   重开路径沿用同一组值。
+3. `platform/windows/tuntap_wintun.c`：
+   - `tuntap_open` 检测 `address_mode == "dhcp"`：不调用 `CreateUnicastIpAddressEntry`，
+     创建适配器与 MTU 后执行
+     `netsh interface ip set address name="<ifName>" source=dhcp`（与上游 `wintap.c` 做法一致）；
+   - `tuntap_get_address` 不再返回缓存，而是用 `GetUnicastIpAddressTable(AF_INET)` 按
+     `InterfaceLuid` 查询当前租约；未拿到地址时返回 `0.0.0.0`，n2n 会继续注册；
+   - 广播：DHCPDISCOVER/REQUEST 的目的地址是 `255.255.255.255`，shim 已按广播 MAC 封装；
+     n2n 在 Windows 上强制 `drop_multicast=0`，回程 OFFER/ACK 能写入 wintun。
+4. `internal/cli/edge.go`：`-a` 帮助文本补充 `dhcp`。
+5. 周期刷新：n2n 已内置 `TUNTAP_IP_MODE_DHCP` 的 `tuntap_get_address` 轮询
+   （`edge_utils.c:3035`），无需另加定时器；`ip_address_changed` 回调会触发重新注册。
+
+验收：
+
+- Linux 侧启动 dnsmasq（`dhcp-range=10.10.40.100,10.10.40.200,12h`）并跑一个 edge；
+  Windows 端 `n2n edge -c demo -a dhcp -l <sn>:7777` 启动后 30 秒内
+  `Get-NetIPAddress -InterfaceAlias n2n0` 出现租约地址；
+- Windows 能 `ping` 同社区对端，对端也能反 ping；
+- 租约续期/地址变化后，supernode 侧看到的注册地址随 `tuntap_get_address` 更新；
+- 未拿到租约期间进程不崩溃、注册地址为 0.0.0.0，日志无错误刷屏。
+
+风险：
+
+- wintun 是 L3 适配器，个别 Windows 版本的 DHCP 客户端可能不在此类接口上启动；若不启动，
+  退路是 shim 内实现最小 DHCP 客户端（DISCOVER/OFFER/REQUEST/ACK + 续租），代价更高。
+- `netsh` 在新系统上被标记为弃用但仍可用；若需完全 IP Helper，可改用
+  `DhcpObtainConfiguration` / `DhcpRegisterParamChange`，实现量明显更大。
+- 与 `-a auto` 的 supernode 分配不能同时启用，必须在 Go 层拒绝。
+

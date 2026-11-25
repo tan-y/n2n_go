@@ -194,7 +194,7 @@ n2n version     # 版本信息
 ## 10. 待确认问题
 
 1. CLI 是否需要兼容 n2n 原生短参数与 `edge.conf` 格式（默认按兼容设计）？
-2. Windows 首期是否支持 IPv6/NDP，以及是否必须与 Linux/macOS TAP 双向互通（wintun 已定为默认方案，见 [Windows.md](Windows.md)）？
+2. Windows 是否必须与 Linux/macOS TAP 双向互通（wintun 已定为默认方案）；IPv6/NDP 已按 `--ipv6` 实现，DHCP 仍待定，见 [Windows.md](Windows.md)。
 3. 是否需要内置 supernode 管理（部署、监控），还是仅作为独立命令？
 4. 是否需要 omniedge 式的账号/网络编排能力，还是定位为纯 n2n CLI？
 5. 分发包形态：单二进制、压缩包、系统包（deb/rpm/brew）还是安装脚本？

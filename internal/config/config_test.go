@@ -84,6 +84,46 @@ func TestHeaderEncryptionRequiresKey(t *testing.T) {
 	}
 }
 
+func TestAuthPasswordRequiresStreamCipherAndKey(t *testing.T) {
+	c := validConfig(t)
+	c.AuthPassword = "pw"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "-J") {
+		t.Fatalf("expected -J without key to be rejected, got %v", err)
+	}
+
+	c = validConfig(t)
+	c.AuthPassword = "pw"
+	c.Key = "secret"
+	c.Cipher = "aes"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "cc20") {
+		t.Fatalf("expected non-stream cipher to be rejected, got %v", err)
+	}
+
+	for _, cipher := range []string{"cc20", "speck"} {
+		c = validConfig(t)
+		c.AuthPassword = "pw"
+		c.Key = "secret"
+		c.Cipher = cipher
+		if err := c.Validate(); err != nil {
+			t.Fatalf("%s with -J should be valid: %v", cipher, err)
+		}
+	}
+}
+
+func TestFederationPublicKeyLength(t *testing.T) {
+	c := validConfig(t)
+	c.FederationPublicKey = strings.Repeat("A", 43)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("43-character key should be valid: %v", err)
+	}
+
+	c = validConfig(t)
+	c.FederationPublicKey = strings.Repeat("A", 44)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("expected too-long error, got %v", err)
+	}
+}
+
 func TestValidateCommunityLength(t *testing.T) {
 	c := validConfig(t)
 	c.Community = strings.Repeat("a", CommunityMax+1)

@@ -281,10 +281,24 @@ func (c *EdgeConfig) Validate() error {
 	if c.HeaderEncryption && (c.Key == "") {
 		return fmt.Errorf("header encryption (-H) requires -k/--key")
 	}
+	if c.AuthPassword != "" {
+		// n2n requires a stream cipher for user-password authentication and
+		// dereferences the payload key unconditionally, so both -k and
+		// -A cc20|speck are mandatory.
+		if c.Key == "" {
+			return fmt.Errorf("user-password authentication (-J) requires -k/--key")
+		}
+		switch strings.ToLower(c.Cipher) {
+		case "cc20", "chacha20", "speck":
+		default:
+			return fmt.Errorf("user-password authentication (-J) requires cipher cc20 or speck, got %q", c.Cipher)
+		}
+	}
 	if c.FederationPublicKey != "" {
-		// Mirrors the length check in n2n's edge.c before ascii_to_bin().
-		if len(c.FederationPublicKey) < 44 {
-			return fmt.Errorf("federation public key is too short: %d characters", len(c.FederationPublicKey))
+		// n2n-keygen emits 43 characters; n2n's edge.c rejects anything that
+		// would not fit its 44-byte buffer.
+		if len(c.FederationPublicKey) >= 44 {
+			return fmt.Errorf("federation public key is too long: %d characters, max 43", len(c.FederationPublicKey))
 		}
 	}
 

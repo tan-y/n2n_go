@@ -112,8 +112,8 @@ func runEdge(args []string) int {
 	fs.BoolVar(&cfg.HeaderEncryption, "header-encryption", cfg.HeaderEncryption, "头部加密（需配合 -k/--key）")
 	fs.StringVar(&cfg.FederationPublicKey, "P", cfg.FederationPublicKey, "联邦公钥（user-password 认证，ASCII）")
 	fs.StringVar(&cfg.FederationPublicKey, "federation-public-key", cfg.FederationPublicKey, "联邦公钥（user-password 认证，ASCII）")
-	fs.StringVar(&cfg.AuthPassword, "J", cfg.AuthPassword, "user-password 认证密码")
-	fs.StringVar(&cfg.AuthPassword, "auth-password", cfg.AuthPassword, "user-password 认证密码")
+	fs.StringVar(&cfg.AuthPassword, "J", cfg.AuthPassword, "user-password 认证密码（需 -k 且 -A cc20|speck，-I 作为用户名）")
+	fs.StringVar(&cfg.AuthPassword, "auth-password", cfg.AuthPassword, "user-password 认证密码（需 -k 且 -A cc20|speck，-I 作为用户名）")
 	fs.StringVar(&cfg.Cipher, "A", cfg.Cipher, "加密算法：none | aes | cc20 | speck | tf（默认 none）")
 	fs.StringVar(&cfg.Cipher, "cipher", cfg.Cipher, "加密算法：none | aes | cc20 | speck | tf（默认 none）")
 	fs.StringVar(&cfg.Compression, "z", cfg.Compression, "压缩算法：none | lzo（默认 none）")
@@ -308,6 +308,6 @@ scripts/multicast-test.sh 验证（当前广播 MAC 实现下不受 -E 约束，
 -a auto 由 supernode 分配地址；多个 edge 同时启动时请给每个节点不同的 -I 描述，否则
 可能拿到相同地址。需要 root 权限。
 
-Windows 需要管理员权限，wintun.dll（0.14+）必须与 exe 同目录；首期仅承载 IPv4，
-暂不支持 -a auto。
+Windows 需要管理员权限，wintun.dll（0.14+）必须与 exe 同目录；支持 IPv4 与 --ipv6
+（含 NDP 应答）；暂不支持 -a auto 与 DHCP。
 `
