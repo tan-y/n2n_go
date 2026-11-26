@@ -224,14 +224,7 @@ func TestValidateAutoAddress(t *testing.T) {
 		c.Community = "demo"
 		c.Supernodes = []string{"127.0.0.1:7777"}
 		c.CIDR = value
-		err := c.Validate()
-		if !supportsAutoAddress() {
-			if err == nil || !strings.Contains(err.Error(), "auto") {
-				t.Fatalf("Validate(%q): want an auto-not-supported error, got %v", value, err)
-			}
-			continue
-		}
-		if err != nil {
+		if err := c.Validate(); err != nil {
 			t.Fatalf("Validate(%q): %v", value, err)
 		}
 		if !c.AutoAddress {
@@ -246,32 +239,29 @@ func TestValidateAutoAddress(t *testing.T) {
 	}
 }
 
+// An omitted -a means SN_ASSIGN, like n2n's own default.
+func TestValidateDefaultsToAuto(t *testing.T) {
+	c := DefaultEdgeConfig()
+	c.Community = "demo"
+	c.Supernodes = []string{"127.0.0.1:7777"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !c.AutoAddress || c.IP != "" || c.Mask != "" || c.CIDR != "auto" {
+		t.Fatalf("got auto=%v ip=%q mask=%q cidr=%q", c.AutoAddress, c.IP, c.Mask, c.CIDR)
+	}
+}
+
 // A config file may carry a static address that -a auto overrides; the parsed
 // IP and mask must not leak into SN_ASSIGN mode.
 func TestValidateAutoAddressClearsStatic(t *testing.T) {
 	c := validConfig(t)
 	c.CIDR = "auto"
-	err := c.Validate()
-	if !supportsAutoAddress() {
-		if err == nil || !strings.Contains(err.Error(), "auto") {
-			t.Fatalf("want an auto-not-supported error, got %v", err)
-		}
-		return
-	}
-	if err != nil {
+	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if !c.AutoAddress || c.IP != "" || c.Mask != "" {
 		t.Fatalf("got auto=%v ip=%q mask=%q", c.AutoAddress, c.IP, c.Mask)
-	}
-}
-
-func TestValidateAddressRequiredMentionsAuto(t *testing.T) {
-	c := DefaultEdgeConfig()
-	c.Community = "demo"
-	c.Supernodes = []string{"127.0.0.1:7777"}
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "auto") {
-		t.Fatalf("expected an address error mentioning auto, got %v", err)
 	}
 }
 

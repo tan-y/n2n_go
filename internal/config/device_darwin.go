@@ -15,10 +15,6 @@ func defaultDeviceName() string {
 // deviceNameMax mirrors N2N_IFNAMSIZ (devstr_t).
 func deviceNameMax() int { return 16 }
 
-// supportsAutoAddress reports whether -a auto (supernode-assigned address) is
-// implemented.
-func supportsAutoAddress() bool { return true }
-
 // platformDefaultMAC draws a random locally administered address.
 func platformDefaultMAC() (string, error) {
 	mac, err := randomMAC()

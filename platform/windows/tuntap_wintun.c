@@ -239,8 +239,7 @@ static int normalize_adapter_name(const char *in, char *out, size_t out_size) {
     return 0;
 }
 
-static uint32_t prefix_length_from_mask(const char *mask) {
-    struct in_addr a;
+static uint32_t prefix_length_from_mask(const char *mask) {    struct in_addr a;
     uint32_t m;
     uint32_t bits = 0;
 
@@ -349,8 +348,25 @@ static int configure_interface(NET_LUID luid, const char *ip, const char *mask, 
     return 0;
 }
 
-static int configure_interface6(NET_LUID luid, int mtu) {
-    MIB_IPINTERFACE_ROW iface;
+/* Applies the address assigned by the supernode after tuntap_open(). */
+int tuntap_win_configure(tuntap_dev *device, const char *ip, const char *mask, int mtu) {
+    if((device == NULL) || (ip == NULL) || (ip[0] == '\0') ||
+       (mask == NULL) || (mask[0] == '\0'))
+        return -1;
+
+    if(configure_interface(g_luid, ip, mask, mtu) < 0)
+        return -1;
+
+    g_local_ip = inet_addr(ip);
+    g_local_mask = inet_addr(mask);
+    device->ip_addr = g_local_ip;
+    device->device_mask = g_local_mask;
+    device->mtu = (uint16_t)mtu;
+
+    return 0;
+}
+
+static int configure_interface6(NET_LUID luid, int mtu) {    MIB_IPINTERFACE_ROW iface;
     NETIO_STATUS rc;
 
     InitializeIpInterfaceEntry(&iface);

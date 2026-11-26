@@ -42,7 +42,7 @@
 - 单一子命令 `n2n edge`，前台运行，需要 root 或 `CAP_NET_ADMIN`。
 - 目标平台：`linux/amd64`、`linux/arm64`。
 - 设备层使用内核 TAP（`/dev/net/tun` + `IFF_TAP|IFF_NO_PI`），收发真实二层以太网帧。
-- 静态 IPv4 地址（`-a IPv4/CIDR`）。
+- 静态 IPv4 地址（`-a IPv4/CIDR`）；supernode 分配地址（`-a auto`，省略 `-a` 即为此模式）。
 - 两套 libc 产物：`glibc`（常规发行版）与 `musl` 静态（单文件、跨发行版）。
 - 构建脚本、工具链镜像、容器冒烟测试。
 

@@ -54,7 +54,8 @@ type EdgeConfig struct {
 	Mask string // dotted IPv4 netmask, filled by SetAddress
 
 	// AutoAddress is set when the address is assigned by the supernode
-	// (SN_ASSIGN); IP and Mask stay empty until the assignment arrives.
+	// (SN_ASSIGN); IP and Mask stay empty until the assignment arrives. This is
+	// also the default when -a is omitted, matching n2n.
 	AutoAddress bool
 
 	// IPv6 enables carrying IPv6 over the tunnel (--ipv6). The interface keeps
@@ -180,7 +181,7 @@ func (c *EdgeConfig) Validate() error {
 		}
 	}
 	cidr := strings.TrimSpace(c.CIDR)
-	if strings.EqualFold(cidr, "auto") {
+	if cidr == "" || strings.EqualFold(cidr, "auto") {
 		c.AutoAddress = true
 		c.CIDR = "auto"
 		c.IP = ""
@@ -188,16 +189,10 @@ func (c *EdgeConfig) Validate() error {
 	} else {
 		c.AutoAddress = false
 		if c.IP == "" || c.Mask == "" {
-			if cidr == "" {
-				return fmt.Errorf("address is required (-a IPv4/CIDR or -a auto)")
-			}
 			if err := c.SetAddress(cidr); err != nil {
 				return err
 			}
 		}
-	}
-	if c.AutoAddress && !supportsAutoAddress() {
-		return fmt.Errorf("address mode auto is not supported on this platform; use a static IPv4/CIDR (-a)")
 	}
 
 	if c.Device == "" {

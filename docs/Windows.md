@@ -830,6 +830,34 @@ NDP 应答端到端可用。测试中出现的两次失败都与 shim 无关：L
 时命中 `eth0` 的 `fe80::/64`；`Get-NetIPAddress` 返回值自带 `%zone`，与脚本追加的作用域
 重复。`build/wsl-v6-ping.sh` 与 `build\verify-ipv6.ps1` 现已显式使用 `%<ifindex>` 并去重。
 
+### 7.4.3 supernode 分配地址（`-a auto`，缺省）
+
+`-a` 省略即为 `auto`（与 n2n 上游一致）：边端先以 `0.0.0.0` 注册，supernode 从社区网段
+（默认池 `10.128.0.0–10.255.255.0`，每个社区一个 `/24`）中按 `dev_desc` 哈希选一个空闲地址，
+通过 `REGISTER_SUPER_ACK` 返回，胶水层再调用 `tuntap_win_configure()` 写回 wintun。
+
+```bash
+# Linux/WSL 对端（省略 -a）
+./bin/n2n-linux-amd64-glibc edge -c demo-auto -l <supernode>:7777 -d n2n4 -I wsl-auto
+ip -4 addr show dev n2n4
+```
+
+```powershell
+# Windows（管理员，省略 -a）
+.\n2n-windows-amd64.exe edge -c demo-auto -l <supernode>:7777 -d n2n0 -I win-auto
+Get-NetIPAddress -InterfaceAlias n2n0 -AddressFamily IPv4    # origin 为 Manual，即 shim 写入
+```
+
+- 静态地址仍可用 `-a 10.0.0.1/24` 显式指定；两种模式互斥。
+- 不同节点必须给不同 `-I` 描述，否则哈希相同，只能靠线性探测拿到不同地址，且重启后顺序不稳定。
+- 首次注册有 20s 重试周期，胶水层等待上限 30s；超时报 `no address assigned after 30s`。
+
+**验证记录（2026-11-26，Windows ↔ WSL）**：Windows 省略 `-a` 启动，拿到
+`10.240.213.217/24`（supernode 日志 `assign IP ... to tap adapter of edge`）；WSL 对端
+`10.240.213.19/24`。Windows → WSL 与 WSL → Windows 的 ping 均 PASS。
+该 WSL 实例在最后一个 `wsl.exe` 会话退出后会结束发行版并杀掉后台进程，因此
+`build\verify-auto.ps1` 会先起一个隐藏的保活会话，测试结束再关闭。
+
 ### 7.5 停止与清理
 
 ```powershell
@@ -920,11 +948,12 @@ Get-NetAdapter -Name n2n0 -ErrorAction SilentlyContinue       # 应不存在
 5. 是否需要保留 tap-windows6 作为可切换的设备层（当前只作为上游参考）？
 6. 是否需要首期暴露 `-x <metric>` 或自动修改防火墙？
 
-## 13. DHCP 地址模式方案（待实现）
+## 13. DHCP 地址模式方案（暂不实现）
 
-现状：Windows 只支持静态 IPv4（`-a IPv4/CIDR`）与 supernode 分配（`-a auto`）；`-a auto`
-走的是 n2n 的 `SN_ASSIGN`，不是 DHCP。n2n 上游本身支持 `-a dhcp:0.0.0.0`（配合 `-r`），
-语义是把接口地址交给 DHCP，并在循环中定期重新读取地址。
+现状：Windows 支持静态 IPv4（`-a IPv4/CIDR`）与 supernode 分配（`-a auto`，缺省模式）；
+`-a auto` 走的是 n2n 的 `SN_ASSIGN`，不是 DHCP。n2n 上游本身支持 `-a dhcp:0.0.0.0`
+（配合 `-r`），语义是把接口地址交给覆盖网内的 DHCP 服务器，并在循环中定期重新读取地址。
+本节只保留方案，当前不实现。
 
 设计目标：新增 `-a dhcp`，由覆盖网内的 DHCP 服务器（例如某一台 Linux edge 上跑 dnsmasq）
 分配地址；Windows 端不实现 DHCP 协议栈，而是让 Windows 自带 DHCP 客户端在 wintun 适配器上工作。

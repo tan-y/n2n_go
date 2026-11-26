@@ -104,8 +104,8 @@ func runEdge(args []string) int {
 	fs.StringVar(&cfg.Community, "community", cfg.Community, "社区名（必填，最长 19 字节）")
 	fs.Var(&supernodes, "l", "supernode 地址 host:port（可重复）")
 	fs.Var(&supernodes, "supernode", "supernode 地址 host:port（可重复）")
-	fs.StringVar(&cfg.CIDR, "a", cfg.CIDR, "静态 IPv4/CIDR（例如 10.0.0.1/24）或 auto（由 supernode 分配）")
-	fs.StringVar(&cfg.CIDR, "ip", cfg.CIDR, "静态 IPv4/CIDR（例如 10.0.0.1/24）或 auto（由 supernode 分配）")
+	fs.StringVar(&cfg.CIDR, "a", cfg.CIDR, "静态 IPv4/CIDR（例如 10.0.0.1/24）；auto 或省略时由 supernode 分配")
+	fs.StringVar(&cfg.CIDR, "ip", cfg.CIDR, "静态 IPv4/CIDR（例如 10.0.0.1/24）；auto 或省略时由 supernode 分配")
 	fs.StringVar(&cfg.Key, "k", cfg.Key, "加密 key（使用非 none 加密算法时必填）")
 	fs.StringVar(&cfg.Key, "key", cfg.Key, "加密 key（使用非 none 加密算法时必填）")
 	fs.BoolVar(&cfg.HeaderEncryption, "H", cfg.HeaderEncryption, "头部加密（需配合 -k/--key）")
@@ -198,7 +198,7 @@ func runEdge(args []string) int {
 	var autoErr chan error
 	if cfg.AutoAddress {
 		autoErr = make(chan error, 1)
-		go func() { autoErr <- waitForAssignedAddress(edge, 15*time.Second) }()
+		go func() { autoErr <- waitForAssignedAddress(edge, 30*time.Second) }()
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -308,6 +308,6 @@ scripts/multicast-test.sh 验证（当前广播 MAC 实现下不受 -E 约束，
 -a auto 由 supernode 分配地址；多个 edge 同时启动时请给每个节点不同的 -I 描述，否则
 可能拿到相同地址。需要 root 权限。
 
-Windows 需要管理员权限，wintun.dll（0.14+）必须与 exe 同目录；支持 IPv4 与 --ipv6
-（含 NDP 应答）；暂不支持 -a auto 与 DHCP。
+Windows 需要管理员权限，wintun.dll（0.14+）必须与 exe 同目录；支持 IPv4（静态或 -a auto）
+与 --ipv6（含 NDP 应答）；暂不支持 DHCP。
 `

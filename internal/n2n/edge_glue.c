@@ -41,6 +41,12 @@ extern int  tuntap_osx_configure(tuntap_dev *device, const char *device_ip,
                                  const char *device_mask, int mtu);
 #endif
 
+#ifdef __linux__
+/* Implemented in tuntap_linux.c through patches/n2n-tuntap-linux.patch. */
+extern int tuntap_configure_address(struct tuntap_dev *device, const char *ip,
+                                    const char *mask, int mtu);
+#endif
+
 struct n2n_go_edge {
     n2n_edge_conf_t conf;
     n2n_edge_t     *eee;
@@ -439,6 +445,16 @@ int n2n_go_edge_configure_auto(n2n_go_edge_t *e) {
 
 #ifdef __APPLE__
     if(tuntap_osx_configure(&e->dev, ip, mask, e->dev.mtu) < 0) {
+        traceEvent(TRACE_ERROR, "failed to apply the supernode-assigned address %s/%s", ip, mask);
+        return -1;
+    }
+#elif defined(_WIN32)
+    if(tuntap_win_configure(&e->dev, ip, mask, e->dev.mtu) < 0) {
+        traceEvent(TRACE_ERROR, "failed to apply the supernode-assigned address %s/%s", ip, mask);
+        return -1;
+    }
+#elif defined(__linux__)
+    if(tuntap_configure_address(&e->dev, ip, mask, e->dev.mtu) < 0) {
         traceEvent(TRACE_ERROR, "failed to apply the supernode-assigned address %s/%s", ip, mask);
         return -1;
     }

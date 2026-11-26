@@ -13,12 +13,12 @@
 | Linux arm64 musl | 完成并已联调 | `bin/n2n-linux-arm64-musl`（静态） |
 | Linux arm64 glibc | 完成并已联调 | `bin/n2n-linux-arm64-glibc`（Debian 11 构建，实测最高符号 GLIBC_2.17） |
 | Linux amd64 | 构建脚本已就绪，尚未实际验证 | `make linux-amd64` / `make linux-amd64-glibc` |
-| Windows amd64 | 首期完成；跨主机双向 `ping`、数据面矩阵、`-H`/`-J` 双向 ping、IPv6/NDP 双向 ping 均已验证 | `bin/n2n-windows-amd64.exe` + 同目录 `wintun.dll` |
+| Windows amd64 | 首期完成；跨主机双向 `ping`、数据面矩阵、`-H`/`-J` 双向 ping、IPv6/NDP 双向 ping、`-a auto` 双向 ping 均已验证 | `bin/n2n-windows-amd64.exe` + 同目录 `wintun.dll` |
 
 已知限制：
 
-- 仅支持 IPv4 地址配置；`-a auto` 由 supernode 分配地址（macOS 已实现，Windows 未实现）。
-- 不支持 DHCP（Windows 方案见 [docs/Windows.md](docs/Windows.md) §13）。
+- 仅支持 IPv4 地址配置；`-a auto` 由 supernode 分配地址（三端均已实现，缺省即 auto）。
+- 不支持 DHCP（方案见 [docs/Windows.md](docs/Windows.md) §13，暂不实现）。
 - Linux 的 edge 需要 `CAP_NET_ADMIN` 和 `/dev/net/tun`。
 - Windows 的 edge 需要管理员权限，`wintun.dll`（0.14+）必须与 exe 同目录；wintun 为 L3，
   `--ipv6` 时透传 IPv6 并应答 NDP，接口使用 Windows 自动生成的 link-local 地址。
@@ -185,5 +185,5 @@ Linux 冒烟脚本会检查注册、`ping` 0% 丢包、TAP 计数、自动 `tapN
 
 - `operation not permitted`：edge 需要 root（macOS）或 `CAP_NET_ADMIN`（Linux）。
 - `/dev/net/tun` 不存在：容器内执行 `mknod /dev/net/tun c 10 200`，并确认宿主机加载了 `tun` 模块。
-- 两个节点拿到相同地址：使用 `-a auto` 时给每个节点不同的 `-I` 描述。
+- 两个节点拿到相同地址：省略 `-a`（即 `auto`）或使用 `-a auto` 时，给每个节点不同的 `-I` 描述。
 - Linux glibc 产物无法启动：确认目标系统的 glibc 版本满足产物符号要求（实测最高 `GLIBC_2.17`）。

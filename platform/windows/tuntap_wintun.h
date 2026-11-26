@@ -29,6 +29,11 @@ void tuntap_win_set_community(const char *community);
  * Must be called before tuntap_open(). */
 void tuntap_win_enable_ipv6(int on);
 
+/* Applies the address assigned by the supernode after tuntap_open() (SN_ASSIGN).
+ * Returns 0 on success. */
+int tuntap_win_configure(struct tuntap_dev *device, const char *ip,
+                         const char *mask, int mtu);
+
 /* Lists adapters whose description mentions Wintun, for diagnostics. */
 void win_print_available_adapters(void);
 

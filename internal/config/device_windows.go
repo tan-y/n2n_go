@@ -19,10 +19,6 @@ func platformDefaultMAC() (string, error) {
 	return "", nil
 }
 
-// supportsAutoAddress reports whether -a auto (supernode-assigned address) is
-// implemented. The wintun device layer only configures a static IPv4 address.
-func supportsAutoAddress() bool { return false }
-
 // validateMAC only accepts a unicast, non-zero address because the shim uses it
 // as the source MAC for every synthesized Ethernet frame.
 func validateMAC(mac net.HardwareAddr) error {
