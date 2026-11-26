@@ -40,7 +40,9 @@ esac
 echo "==> preparing $WORK from $N2N_SRC"
 rm -rf "$WORK"
 mkdir -p "$WORK"
-rsync -a --exclude build --exclude bin --exclude .git "$N2N_SRC/" "$WORK/"
+# The n2n tree ships packaging symlinks (packages/centos -> rpm) that rsync
+# cannot recreate on Windows; the library build does not need them.
+rsync -a --exclude build --exclude bin --exclude .git --exclude packages "$N2N_SRC/" "$WORK/"
 
 echo "==> installing wintun device layer"
 cp "$ROOT/platform/windows/tuntap_wintun.c" "$WORK/src/win32/wintap.c"
