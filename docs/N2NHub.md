@@ -46,6 +46,7 @@ helper 提权），细节见 §6；产品设计不以它为依据。
 
 ## 6. 技术参考索引
 
+- 移动端与 Web 接入：[Mobile.md](Mobile.md)。
 - macOS utun 适配与 3.1.1 迁移修正：[N2NGo.md](N2NGo.md) §7.1、[macOS.md](macOS.md) §4.1。
 - `-DSKIP_MULTICAST_PEERS_DISCOVERY`：[macOS.md](macOS.md) §3.2。
 - 封装样例仓库（作者本机）：`/Users/xtao/Work/n2n/omniedge-cli`。

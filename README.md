@@ -181,6 +181,8 @@ Linux 冒烟脚本会检查注册、`ping` 0% 丢包、TAP 计数、自动 `tapN
 - [docs/macOS-p5.md](docs/macOS-p5.md)：macOS 后续能力（组播、IPv6、互操作等）
 - [docs/Linux.md](docs/Linux.md)：Linux 构建、补丁与联调
 - [docs/Windows.md](docs/Windows.md)：Windows 首期实现方案
+- [docs/N2NHub.md](docs/N2NHub.md)：n2nhub SaaS 设计参考
+- [docs/Mobile.md](docs/Mobile.md)：移动端与 Web 接入方案
 
 ## 故障排查
 
