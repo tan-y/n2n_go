@@ -94,7 +94,8 @@ jobs:
 
       - name: Export GOROOT for the MSYS2 shell
         shell: pwsh
-        run: "GOROOT=$(go env GOROOT)" | Out-File -FilePath $env:GITHUB_ENV -Append
+        run: |
+          "GOROOT=$(go env GOROOT)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Fetch wintun 0.14.1
         shell: pwsh
