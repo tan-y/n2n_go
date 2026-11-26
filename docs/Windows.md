@@ -49,10 +49,12 @@ Windows 与 macOS/Linux 的差异不在协议层，而在设备层、构建环�
 
 - tap-windows6 作为可切换的设备层（仅保留 n2n 上游实现作参考，不进首期产物）；
 - DHCP 地址模式（方案见 §13）；
+- 非 IP 以太网协议透传（LLDP/STP 等）：wintun 是 L3 设备，Windows 协议栈既不产生也不接收
+  这类帧，注入 wintun 只会被当成畸形 IP 包；ARP 由 shim 代答，IPv4/IPv6 正常承载。若必须透传，
+  需改用 tap-windows6（见上一条）；
 - Windows 服务（SCM）化、托盘/GUI、安装器与代码签名；
 - `supernode` 子命令（测试用原生 `supernode.exe`）；
 - `arm64`/`386` 产物；
-- 非 IP 以太网协议（LLDP、STP 等）的透传。
 
 **验收标准**
 

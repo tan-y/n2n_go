@@ -21,7 +21,8 @@
 - 不支持 DHCP（方案见 [docs/Windows.md](docs/Windows.md) §13，暂不实现）。
 - Linux 的 edge 需要 `CAP_NET_ADMIN` 和 `/dev/net/tun`。
 - Windows 的 edge 需要管理员权限，`wintun.dll`（0.14+）必须与 exe 同目录；wintun 为 L3，
-  `--ipv6` 时透传 IPv6 并应答 NDP，接口使用 Windows 自动生成的 link-local 地址。
+  `--ipv6` 时透传 IPv6 并应答 NDP，接口使用 Windows 自动生成的 link-local 地址；不承载
+  LLDP/STP 等非 IP 以太网帧（ARP 由 shim 代答）。
 
 ## 目录结构
 

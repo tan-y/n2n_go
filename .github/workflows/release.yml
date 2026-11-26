@@ -1,0 +1,166 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: linux-${{ matrix.arch }}-${{ matrix.libc }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+        libc: [glibc, musl]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build inside the ${{ matrix.libc }} container
+        run: |
+          docker build \
+            -f docker/linux/Dockerfile.${{ matrix.libc }} \
+            --build-arg TARGETARCH=${{ matrix.arch }} \
+            --build-arg GO_URL=https://go.dev/dl \
+            -t n2n-go-build docker/linux
+          docker run --rm \
+            -e ARCH=${{ matrix.arch }} \
+            -e LIBC=${{ matrix.libc }} \
+            -e N2N_SRC=/n2n-src \
+            -v "$PWD":/work -w /work \
+            -v "$PWD/third_party/n2n":/n2n-src:ro \
+            n2n-go-build ./scripts/build-n2n-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}-${{ matrix.libc }}
+          path: |
+            bin/n2n-linux-${{ matrix.arch }}-${{ matrix.libc }}
+            bin/supernode-linux-${{ matrix.arch }}-${{ matrix.libc }}
+          if-no-files-found: error
+
+  macos:
+    name: macos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      - name: Install autotools
+        run: brew install autoconf automake pkg-config
+
+      - name: Build arm64 and amd64
+        run: make build-all
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            bin/n2n-darwin-arm64
+            bin/n2n-darwin-amd64
+          if-no-files-found: error
+
+  windows:
+    name: windows-amd64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      - name: Export GOROOT for the MSYS2 shell
+        shell: pwsh
+        run: "GOROOT=$(go env GOROOT)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Fetch wintun 0.14.1
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun -Force
+          New-Item -ItemType Directory -Force third_party/wintun/amd64 | Out-Null
+          Copy-Item wintun/wintun/bin/amd64/wintun.dll third_party/wintun/amd64/wintun.dll
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+            autoconf
+            automake
+            libtool
+            pkgconf
+            patch
+            rsync
+
+      - name: Build edge and library
+        shell: msys2 {0}
+        run: |
+          export PATH="$(cygpath -u "$GOROOT")/bin:$PATH"
+          bash ./scripts/build-n2n-win.sh
+          SKIP_N2N_LIB=1 bash ./scripts/build-windows.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: |
+            bin/n2n-windows-amd64.exe
+            bin/wintun.dll
+          if-no-files-found: error
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package assets
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p out
+          ( cd artifacts/windows-amd64 &&
+            zip -j "../../out/n2n-go-${tag}-windows-amd64.zip" n2n-windows-amd64.exe wintun.dll )
+          tar -czf "out/n2n-go-${tag}-darwin-arm64.tar.gz" -C artifacts/macos n2n-darwin-arm64
+          tar -czf "out/n2n-go-${tag}-darwin-amd64.tar.gz" -C artifacts/macos n2n-darwin-amd64
+          for d in artifacts/linux-*; do
+            suffix="${d#artifacts/linux-}"
+            tar -czf "out/n2n-go-${tag}-linux-${suffix}.tar.gz" -C "$d" .
+          done
+          ( cd out && sha256sum * > SHA256SUMS )
+          ls -l out
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: n2n-go ${{ github.ref_name }}
+          files: out/*
+          generate_release_notes: true
