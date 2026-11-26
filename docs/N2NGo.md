@@ -2,17 +2,13 @@
 
 ## 1. 原始需求
 
-> 参考仓库：
-> - `/Users/xtao/Work/n2n/omniedge-cli`
-> - `/Users/xtao/Work/n2n/n2n`
->
-> 期望参考 omniedge-cli，用 Go 包一下 n2n 的命令行，实现多平台的 n2n 命令行。
+原始需求、SaaS 产品参考与 n2n Go 封装样例见 [SaaS.md](SaaS.md)。
 
 ## 2. 背景与目标
 
 n2n 是一套 C 实现的 P2P 二层 VPN（edge + supernode + community），原生通过 autotools 编译，命令行参数繁多，且各平台（Linux / macOS / Windows / FreeBSD / OpenWrt）需要自行编译和适配 TUN/TAP。
 
-omniedge-cli 展示了“用 Go 包装 n2n”的可行路径：CGO 直接调用 `libn2n.a`，用 cobra 提供统一 CLI，并针对多平台交叉编译与 TUN/TAP 差异做补丁。
+参考实现（n2n 的 Go 封装样例）见 [SaaS.md](SaaS.md) §4。
 
 本项目目标：
 
@@ -21,21 +17,13 @@ omniedge-cli 展示了“用 Go 包装 n2n”的可行路径：CGO 直接调用 
 3. 一次代码，多平台构建：macOS、Linux（含 arm/mips）、Windows、FreeBSD、OpenWrt；
 4. 保留 n2n 原生能力的完整性与兼容性，同时提供更友好的参数和运行方式。
 
-**非目标（初版）**：不实现 omniedge 的 SaaS 账号体系（登录、网络编排、心跳上报）；如后续需要，再作为独立模块叠加。
+**非目标（初版）**：SaaS 账号体系（登录、网络编排、心跳上报），边界见 [SaaS.md](SaaS.md) §5。
 
 ## 3. 参考实现分析
 
-### 3.1 omniedge-cli 的包装方式
+### 3.1 n2n 的 Go 封装样例
 
-| 层次 | 做法 | 位置 |
-| --- | --- | --- |
-| n2n 源码引入 | `go:generate` 拉取 n2n 源码，打补丁后用 `configure && make` 产出 `libn2n.a` | `internal/coren2n/edge.go`、`internal/coren2n/make_n2n` |
-| CGO 绑定 | `#cgo LDFLAGS: -ln2n -L${SRCDIR}/n2n`，暴露 `edge_configure` / `tuntap_open` / `edge_start` | `internal/coren2n/edge.c`、`edge.h` |
-| 生命周期 | 用 `int *keep_running` 指针控制 edge 主循环，`Stop()` 置 0 实现优雅退出 | `internal/coren2n/edge.go` |
-| 平台适配 | macOS 用 `utun` 补丁替换 tuntaposx；OpenWrt 按架构切换 musl 工具链 | `patches/`、`make_n2n_openwrt` |
-| CLI | cobra + viper，命令：`login/register/join/start/scan/version` | `cmd/edgecli/cmd/` |
-| 提权 | 独立 helper 进程承载需要 root 的操作 | `cmd/omniedge-helper`、`pkg/bridge` |
-| 构建 | Makefile 按 `GOOS/GOARCH` 设置 `CGO_ENABLED=1`，先 `go generate` 再 build | `Makefile` |
+逐层分析见 [SaaS.md](SaaS.md) §4。
 
 ### 3.2 n2n 原生能力
 
@@ -145,7 +133,7 @@ n2n version     # 版本信息
 **现状判断**
 
 - n2n 3.1.1 原生 [tuntap_osx.c](file:///Users/xtao/Work/n2n/n2n/src/tuntap_osx.c) 走 `/dev/tapN`（tuntaposx 第三方 kext）。macOS 10.15 起 Apple 弃用网络 kext，Apple Silicon 上加载 kext 还需降低安全级别，该路径已不可用。
-- omniedge-cli 的 [tuntap_osx_utun.c](file:///Users/xtao/Work/n2n/omniedge-cli/patches/tuntap_osx_utun.c) 改用系统原生 `utun`（`PF_SYSTEM` + `SYSPROTO_CONTROL` + `com.apple.net.utun_control`），方向正确，但该补丁基于 `omniedgeio/n2n` 的 2.6 分支，**不能直接套到 3.1.1**：
+- 参考实现的 utun 补丁改用系统原生 `utun`（`PF_SYSTEM` + `SYSPROTO_CONTROL` + `com.apple.net.utun_control`），方向正确，但该补丁基于 `omniedgeio/n2n` 的 2.6 分支，**不能直接套到 3.1.1**（参考信息见 [SaaS.md](SaaS.md) §6）：
   - `tuntap_open` 在 3.1.1 是 8 个参数（多一个 `int metric`），补丁为 7 个；
   - 3.1.1 的 edge 注册 supernode 时用 `device->device_mask` 计算 `net_bitlen`（[edge_utils.c](file:///Users/xtao/Work/n2n/n2n/src/edge_utils.c#L1321)），补丁只写 `ip_addr`，未设置 `device_mask`；
   - `dev_name` 类型为 `devstr_t`、`mtu` 为 `uint16_t`，字段需对齐 [n2n_typedefs.h](file:///Users/xtao/Work/n2n/n2n/include/n2n_typedefs.h#L235-L243)。
@@ -196,6 +184,6 @@ n2n version     # 版本信息
 1. CLI 是否需要兼容 n2n 原生短参数与 `edge.conf` 格式（默认按兼容设计）？
 2. Windows 是否必须与 Linux/macOS TAP 双向互通（wintun 已定为默认方案）；IPv6/NDP 已按 `--ipv6` 实现，DHCP 暂不实现（方案见 [Windows.md](Windows.md) §13）。
 3. 是否需要内置 supernode 管理（部署、监控），还是仅作为独立命令？
-4. 是否需要 omniedge 式的账号/网络编排能力，还是定位为纯 n2n CLI？
+4. SaaS 能力的取舍见 [SaaS.md](SaaS.md) §7。
 5. 分发包形态：单二进制、压缩包、系统包（deb/rpm/brew）还是安装脚本？
 6. macOS 是否接受 `utun` 方案的限制（仅 IPv4、广播语义、需 root）？若要求 IPv6 或 App Store 分发，则需改用 NetworkExtension。

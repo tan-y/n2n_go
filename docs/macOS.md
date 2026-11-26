@@ -207,7 +207,7 @@ rsync -a include/ "$ROOT/third_party/n2n-src/include/"
 
 - `CC` 显式写成 `/usr/bin/clang`：在 `nix-shell` 中 PATH 上的 `clang` 是 nixpkgs 的 wrapper（21.1.8），不保证指向 Apple SDK；显式指定可避免工具链漂移。
 - 静态库只做编译和 `ar` 归档，不涉及链接，因此 arm64 机器交叉编译 `x86_64` 不需要 Rosetta。
-- `-DSKIP_MULTICAST_PEERS_DISCOVERY` 与 omniedge-cli 的做法一致，避免局域网组播发现带来的权限与噪音；首期也不依赖该发现机制。
+- `-DSKIP_MULTICAST_PEERS_DISCOVERY`：关闭局域网组播发现，避免额外的权限与噪音；首期不依赖该发现机制（参考实现也如此，见 [SaaS.md](SaaS.md) §6）。
 - `patches/n2n-keep-running.patch`：3.1.1 的 `run_edge_loop` 入口会无条件写 `*keep_running = true`，会覆盖 Go 侧在循环启动前发出的停止请求；补丁移除该赋值，由胶水层自行设置初值并在进入循环前检查 `stop_requested`。
 - `unset SDKROOT NIX_CFLAGS_COMPILE NIX_CFLAGS_LINK NIX_LDFLAGS`：避免 nix-shell 注入的 SDK 覆盖 Xcode Command Line Tools 的 SDK；`MACOSX_DEPLOYMENT_TARGET=11.0` 与 Go darwin/arm64 的默认部署目标一致，并通过 `-mmacosx-version-min` 传给 clang。
 - 头文件：编译后把 `include/` 复制到 `third_party/n2n-src/include/`，使 cgo 只依赖仓库内副本，`build/` 可随时清理。
@@ -292,7 +292,7 @@ import "C"
 
 ### 4.1 utun 适配层
 
-以 omniedge-cli 的 [tuntap_osx_utun.c](../patches/tuntap_osx_utun.c)（本地参考路径 `/Users/xtao/Work/n2n/omniedge-cli/patches/tuntap_osx_utun.c`）为蓝本，但**不能直接复制**。相对该补丁必须做以下修正：
+以参考实现的 utun 补丁为蓝本（来源与索引见 [SaaS.md](SaaS.md) §6），但**不能直接复制**。相对该补丁必须做以下修正：
 
 | 问题 | 参考补丁现状 | 本项目修正 |
 | --- | --- | --- |
